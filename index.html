@@ -1,0 +1,1309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Neutron</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/p5.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      background: #1a1a2e;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    main { text-align: center; }
+  </style>
+</head>
+<body>
+<main><div id="sketch-holder"></div></main>
+<script>
+// =========================================================================
+// Neutron — p5.js implementation
+// =========================================================================
+
+// --- constants -----------------------------------------------------------
+
+const GRID = 5;
+const CELL = 90;
+const PAD = 40;                       // padding around board for labels
+const PIECE_R = 32;                   // piece radius
+const CANVAS_W = GRID * CELL + PAD * 2;
+const CANVAS_H = GRID * CELL + PAD * 2 + 80; // extra for status text
+
+const DIRS = [
+  [0,1],[0,-1],[1,0],[-1,0],         // orthogonal
+  [1,1],[1,-1],[-1,1],[-1,-1]        // diagonal
+];
+
+const COL_LABELS = 'abcde';
+
+// colors
+const C_BG        = '#1a1a2e';
+const C_BOARD     = '#2d4a3e';
+const C_BOARD_ALT = '#3a5f50';
+const C_LINE      = '#1a3028';
+const C_HUMAN     = '#4fc3f7';        // light blue
+const C_AI        = '#ef5350';        // red
+const C_NEUTRON   = '#fdd835';        // gold
+const C_HIGHLIGHT = 'rgba(255,255,255,0.25)';
+const C_VALID     = 'rgba(124,252,0,0.22)';
+const C_SELECTED  = 'rgba(255,255,255,0.5)';
+const C_TEXT      = '#e0e0e0';
+
+// --- game state ----------------------------------------------------------
+
+// phases
+const PHASE_MENU           = 'menu';
+const PHASE_HUMAN_NEUTRON  = 'human_neutron';
+const PHASE_HUMAN_SOLDIER_SELECT = 'human_soldier_select';
+const PHASE_HUMAN_SOLDIER_DEST   = 'human_soldier_dest';
+const PHASE_AI_THINKING    = 'ai_thinking';
+const PHASE_AI_ANIMATING   = 'ai_animating';
+const PHASE_GAME_OVER      = 'game_over';
+
+const ANIM_DURATION = 350; // ms per slide
+
+let board;            // Board object
+let humanPlayer;      // 1 or 2
+let aiPlayer;
+let currentPlayer;    // whose turn (1 or 2)
+let firstTurn;
+let phase;
+let statusText = '';
+let validDests = [];  // [{col, row}, ...]
+let selectedSoldier = null; // {col, row}
+let neutronSelected = false; // true once player clicks the neutron
+let winner = null;
+let winReason = '';
+let aiInstance = null;
+let difficulty = 'easy'; // 'easy' or 'intermediate'
+
+// --- animation state -----------------------------------------------------
+// When non-null, a piece is sliding on screen.
+// { fromX, fromY, toX, toY, startTime, piece: 'N' | '1' | '2',
+//   gridFrom, gridTo, onComplete: fn }
+let anim = null;
+
+// --- Board class ---------------------------------------------------------
+
+class Board {
+  constructor(bottomPlayer) {
+    this.grid = Array.from({length: GRID}, () => Array(GRID).fill(' '));
+    this.neutron = {col: 2, row: 2};
+    this.soldiers = {1: [], 2: []};
+    this.homeRow = {};
+    const topPlayer = bottomPlayer === 1 ? 2 : 1;
+    this.homeRow[bottomPlayer] = 0;
+    this.homeRow[topPlayer] = 4;
+    this._setup(bottomPlayer, topPlayer);
+  }
+
+  _setup(bottom, top) {
+    for (let c = 0; c < GRID; c++) {
+      this._place(c, 0, String(bottom));
+      this.soldiers[bottom].push({col: c, row: 0});
+      this._place(c, 4, String(top));
+      this.soldiers[top].push({col: c, row: 4});
+    }
+    this._place(this.neutron.col, this.neutron.row, 'N');
+  }
+
+  _place(c, r, ch) { this.grid[r][c] = ch; }
+
+  copy() {
+    const b = Object.create(Board.prototype);
+    b.grid = this.grid.map(row => [...row]);
+    b.neutron = {...this.neutron};
+    b.soldiers = {
+      1: this.soldiers[1].map(s => ({...s})),
+      2: this.soldiers[2].map(s => ({...s}))
+    };
+    b.homeRow = {...this.homeRow};
+    return b;
+  }
+
+  slideDest(pos, dc, dr) {
+    let c = pos.col, r = pos.row;
+    let last = null;
+    while (true) {
+      c += dc; r += dr;
+      if (c < 0 || c >= GRID || r < 0 || r >= GRID) break;
+      if (this.grid[r][c] !== ' ') break;
+      last = {col: c, row: r};
+    }
+    return last;
+  }
+
+  getSlides(pos) {
+    const dests = [];
+    for (const [dc, dr] of DIRS) {
+      const d = this.slideDest(pos, dc, dr);
+      if (d) dests.push(d);
+    }
+    return dests;
+  }
+
+  isValidSlide(frm, to) {
+    return this.getSlides(frm).some(d => d.col === to.col && d.row === to.row);
+  }
+
+  move(frm, to) {
+    const ch = this.grid[frm.row][frm.col];
+    this.grid[frm.row][frm.col] = ' ';
+    this.grid[to.row][to.col] = ch;
+    if (ch === 'N') {
+      this.neutron = {col: to.col, row: to.row};
+    } else {
+      const player = parseInt(ch);
+      const idx = this.soldiers[player].findIndex(s => s.col === frm.col && s.row === frm.row);
+      if (idx >= 0) this.soldiers[player][idx] = {col: to.col, row: to.row};
+    }
+  }
+
+  checkWinner() {
+    for (const [p, hr] of Object.entries(this.homeRow)) {
+      if (this.neutron.row === hr) return parseInt(p);
+    }
+    return null;
+  }
+
+  neutronCanMove() { return this.getSlides(this.neutron).length > 0; }
+
+  hasSoldierMove(player) {
+    return this.soldiers[player].some(s => this.getSlides(s).length > 0);
+  }
+}
+
+// --- AI ------------------------------------------------------------------
+
+class SimpleAI {
+  constructor(player) {
+    this.player = player;
+    this.opponent = player === 1 ? 2 : 1;
+    this.plannedSoldierMove = null;
+  }
+
+  chooseNeutronMove(board) {
+    const [nDest, sMove] = this._planFullTurn(board);
+    this.plannedSoldierMove = sMove;
+    return nDest;
+  }
+
+  chooseSoldierMove(board) {
+    if (this.plannedSoldierMove) {
+      const m = this.plannedSoldierMove;
+      this.plannedSoldierMove = null;
+      if (board.isValidSlide(m[0], m[1])) return m;
+    }
+    return this._pickSoldierMove(board);
+  }
+
+  _planFullTurn(board) {
+    const candidates = this._enumerateTurns(board);
+    for (const [n, s] of candidates) {
+      if (this._turnWins(board, n, s)) return [n, s];
+    }
+    const safe = candidates.filter(([n, s]) => !this._turnLoses(board, n, s));
+    if (safe.length) return safe[Math.floor(Math.random() * safe.length)];
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  }
+
+  _pickSoldierMove(board) {
+    const moves = [];
+    for (const s of board.soldiers[this.player]) {
+      for (const d of board.getSlides(s)) moves.push([s, d]);
+    }
+    return moves[Math.floor(Math.random() * moves.length)];
+  }
+
+  _enumerateTurns(board) {
+    const turns = [];
+    for (const nDest of board.getSlides(board.neutron)) {
+      const b1 = board.copy();
+      b1.move(b1.neutron, nDest);
+      if (b1.checkWinner() === this.player) {
+        for (const s of b1.soldiers[this.player]) {
+          for (const sd of b1.getSlides(s)) return [[nDest, [s, sd]]];
+        }
+      }
+      for (const s of b1.soldiers[this.player]) {
+        for (const sd of b1.getSlides(s)) turns.push([nDest, [s, sd]]);
+      }
+    }
+    return turns;
+  }
+
+  _turnWins(board, nDest, sMove) {
+    const b = board.copy();
+    b.move(b.neutron, nDest);
+    if (b.checkWinner() === this.player) return true;
+    b.move(sMove[0], sMove[1]);
+    return b.checkWinner() === this.player;
+  }
+
+  _turnLoses(board, nDest, sMove) {
+    const b = board.copy();
+    b.move(b.neutron, nDest);
+    if (b.checkWinner() === this.opponent) return true;
+    b.move(sMove[0], sMove[1]);
+    if (b.checkWinner() === this.opponent) return true;
+    for (const od of b.getSlides(b.neutron)) {
+      const b2 = b.copy();
+      b2.move(b2.neutron, od);
+      if (b2.checkWinner() === this.opponent) return true;
+    }
+    return false;
+  }
+}
+
+// --- Minimax AI ----------------------------------------------------------
+
+class MinimaxAI {
+  constructor(player, maxDepth = 3) {
+    this.player = player;
+    this.opponent = player === 1 ? 2 : 1;
+    this.maxDepth = maxDepth;
+    this.plannedSoldierMove = null;
+  }
+
+  chooseNeutronMove(board) {
+    let bestScore = -Infinity;
+    let bestNDest = null;
+    let bestSMove = null;
+
+    for (const nDest of board.getSlides(board.neutron)) {
+      const b1 = board.copy();
+      b1.move(b1.neutron, nDest);
+      const w1 = b1.checkWinner();
+      if (w1 === this.player) {
+        // immediate win — pick any soldier move
+        const sm = this._anySoldierMove(b1);
+        this.plannedSoldierMove = sm;
+        return nDest;
+      }
+      if (w1 === this.opponent) continue; // skip losing neutron moves
+
+      for (const s of b1.soldiers[this.player]) {
+        for (const sd of b1.getSlides(s)) {
+          const b2 = b1.copy();
+          b2.move(s, sd);
+          const w2 = b2.checkWinner();
+          if (w2 === this.player) {
+            this.plannedSoldierMove = [s, sd];
+            return nDest;
+          }
+          if (w2 === this.opponent) continue;
+
+          // opponent's turn next — minimize
+          const score = this._minimax(b2, this.maxDepth - 1, false, -Infinity, Infinity);
+          if (score > bestScore) {
+            bestScore = score;
+            bestNDest = nDest;
+            bestSMove = [s, sd];
+          }
+        }
+      }
+    }
+
+    this.plannedSoldierMove = bestSMove;
+    return bestNDest;
+  }
+
+  chooseSoldierMove(board) {
+    if (this.plannedSoldierMove) {
+      const m = this.plannedSoldierMove;
+      this.plannedSoldierMove = null;
+      if (board.isValidSlide(m[0], m[1])) return m;
+    }
+    return this._anySoldierMove(board);
+  }
+
+  _anySoldierMove(board) {
+    for (const s of board.soldiers[this.player]) {
+      const slides = board.getSlides(s);
+      if (slides.length > 0) return [s, slides[0]];
+    }
+    return null;
+  }
+
+  // depth counts full turns (each = neutron + soldier for one player)
+  _minimax(board, depth, isMaximizing, alpha, beta) {
+    const w = board.checkWinner();
+    if (w === this.player) return 1000 + depth;
+    if (w === this.opponent) return -1000 - depth;
+    if (depth <= 0) return this._evaluate(board);
+
+    const mover = isMaximizing ? this.player : this.opponent;
+
+    // neutron phase
+    const nSlides = board.getSlides(board.neutron);
+    if (nSlides.length === 0) {
+      // current mover can't move neutron — they lose
+      return isMaximizing ? -1000 - depth : 1000 + depth;
+    }
+
+    let best = isMaximizing ? -Infinity : Infinity;
+
+    for (const nDest of nSlides) {
+      const b1 = board.copy();
+      b1.move(b1.neutron, nDest);
+      const w1 = b1.checkWinner();
+
+      if (w1 !== null) {
+        // neutron reached a home row — score it, but don't blindly return;
+        // the current mover would only pick this if it helps them
+        const nScore = w1 === this.player ? 1000 + depth : -1000 - depth;
+        if (isMaximizing) {
+          best = Math.max(best, nScore);
+          alpha = Math.max(alpha, nScore);
+        } else {
+          best = Math.min(best, nScore);
+          beta = Math.min(beta, nScore);
+        }
+        if (beta <= alpha) return best;
+        continue; // no soldier move needed after game ends
+      }
+
+      // soldier phase — check if mover has any moves
+      let hasSoldierMoves = false;
+      for (const s of b1.soldiers[mover]) {
+        for (const sd of b1.getSlides(s)) {
+          hasSoldierMoves = true;
+          const b2 = b1.copy();
+          b2.move(s, sd);
+          const w2 = b2.checkWinner();
+          let score;
+          if (w2 === this.player) {
+            score = 1000 + depth;
+          } else if (w2 === this.opponent) {
+            score = -1000 - depth;
+          } else {
+            score = this._minimax(b2, depth - 1, !isMaximizing, alpha, beta);
+          }
+
+          if (isMaximizing) {
+            best = Math.max(best, score);
+            alpha = Math.max(alpha, score);
+          } else {
+            best = Math.min(best, score);
+            beta = Math.min(beta, score);
+          }
+          if (beta <= alpha) return best;
+        }
+      }
+
+      if (!hasSoldierMoves) {
+        // mover can't move any soldier after this neutron move — they lose
+        const noMoveScore = isMaximizing ? -1000 - depth : 1000 + depth;
+        if (isMaximizing) {
+          best = Math.max(best, noMoveScore);
+          alpha = Math.max(alpha, noMoveScore);
+        } else {
+          best = Math.min(best, noMoveScore);
+          beta = Math.min(beta, noMoveScore);
+        }
+        if (beta <= alpha) return best;
+      }
+    }
+
+    return best;
+  }
+
+  _evaluate(board) {
+    const myRow = board.homeRow[this.player];
+    const oppRow = board.homeRow[this.opponent];
+    const nRow = board.neutron.row;
+
+    // neutron distance to each home row
+    const myDist = Math.abs(nRow - myRow);
+    const oppDist = Math.abs(nRow - oppRow);
+    let score = (oppDist - myDist) * 20;
+
+    // mobility: count how many directions the neutron can move
+    const nMoves = board.getSlides(board.neutron).length;
+
+    // soldier mobility advantage
+    let myMobility = 0, oppMobility = 0;
+    for (const s of board.soldiers[this.player]) myMobility += board.getSlides(s).length;
+    for (const s of board.soldiers[this.opponent]) oppMobility += board.getSlides(s).length;
+    score += (myMobility - oppMobility) * 3;
+
+    // bonus for having soldiers near the neutron (control)
+    for (const s of board.soldiers[this.player]) {
+      const d = Math.abs(s.col - board.neutron.col) + Math.abs(s.row - board.neutron.row);
+      score += Math.max(0, 5 - d) * 2;
+    }
+    for (const s of board.soldiers[this.opponent]) {
+      const d = Math.abs(s.col - board.neutron.col) + Math.abs(s.row - board.neutron.row);
+      score -= Math.max(0, 5 - d) * 2;
+    }
+
+    return score;
+  }
+}
+
+// --- Advanced AI (iterative deepening) -----------------------------------
+
+class AdvancedAI {
+  constructor(player, timeLimitMs = 2000) {
+    this.player = player;
+    this.opponent = player === 1 ? 2 : 1;
+    this.timeLimit = timeLimitMs;
+    this.plannedSoldierMove = null;
+    this.deadline = 0;
+    this.timedOut = false;
+    this.nodesSearched = 0;
+  }
+
+  chooseNeutronMove(board) {
+    this.deadline = performance.now() + this.timeLimit;
+    this.timedOut = false;
+
+    let bestNDest = null;
+    let bestSMove = null;
+
+    // iterative deepening: start shallow, go deeper until time runs out
+    for (let depth = 1; depth <= 20; depth++) {
+      this.nodesSearched = 0;
+      const result = this._searchRoot(board, depth);
+      if (this.timedOut) break; // use previous completed depth's result
+      if (result) {
+        bestNDest = result.nDest;
+        bestSMove = result.sMove;
+        // if we found a forced win, stop early
+        if (result.score >= 900) break;
+      }
+    }
+
+    this.plannedSoldierMove = bestSMove;
+    return bestNDest;
+  }
+
+  chooseSoldierMove(board) {
+    if (this.plannedSoldierMove) {
+      const m = this.plannedSoldierMove;
+      this.plannedSoldierMove = null;
+      if (board.isValidSlide(m[0], m[1])) return m;
+    }
+    // fallback
+    for (const s of board.soldiers[this.player]) {
+      const slides = board.getSlides(s);
+      if (slides.length > 0) return [s, slides[0]];
+    }
+    return null;
+  }
+
+  _searchRoot(board, maxDepth) {
+    let bestScore = -Infinity;
+    let bestNDest = null;
+    let bestSMove = null;
+
+    // generate and order neutron moves
+    const nSlides = board.getSlides(board.neutron);
+    const nMoves = this._orderNeutronMoves(board, nSlides);
+
+    for (const nDest of nMoves) {
+      const b1 = board.copy();
+      b1.move(b1.neutron, nDest);
+      const w1 = b1.checkWinner();
+      if (w1 === this.player) {
+        // immediate win
+        for (const s of b1.soldiers[this.player]) {
+          const slides = b1.getSlides(s);
+          if (slides.length > 0) return { nDest, sMove: [s, slides[0]], score: 1000 + maxDepth };
+        }
+      }
+      if (w1 === this.opponent) continue;
+
+      // generate and order soldier moves
+      const sMoves = this._orderSoldierMoves(b1, this.player);
+
+      for (const [s, sd] of sMoves) {
+        if (this.timedOut) return null;
+
+        const b2 = b1.copy();
+        b2.move(s, sd);
+        const w2 = b2.checkWinner();
+        let score;
+        if (w2 === this.player) {
+          score = 1000 + maxDepth;
+        } else if (w2 === this.opponent) {
+          continue;
+        } else {
+          score = this._minimax(b2, maxDepth - 1, false, bestScore, Infinity);
+          if (this.timedOut) return null;
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestNDest = nDest;
+          bestSMove = [s, sd];
+        }
+      }
+    }
+
+    if (bestNDest === null) return null;
+    return { nDest: bestNDest, sMove: bestSMove, score: bestScore };
+  }
+
+  _minimax(board, depth, isMaximizing, alpha, beta) {
+    this.nodesSearched++;
+    // check time every 1000 nodes
+    if ((this.nodesSearched & 1023) === 0 && performance.now() >= this.deadline) {
+      this.timedOut = true;
+      return 0;
+    }
+
+    const w = board.checkWinner();
+    if (w === this.player) return 1000 + depth;
+    if (w === this.opponent) return -1000 - depth;
+    if (depth <= 0) return this._evaluate(board);
+
+    const mover = isMaximizing ? this.player : this.opponent;
+
+    const nSlides = board.getSlides(board.neutron);
+    if (nSlides.length === 0) {
+      return isMaximizing ? -1000 - depth : 1000 + depth;
+    }
+
+    let best = isMaximizing ? -Infinity : Infinity;
+    const orderedN = this._orderNeutronMoves(board, nSlides);
+
+    for (const nDest of orderedN) {
+      if (this.timedOut) return best;
+
+      const b1 = board.copy();
+      b1.move(b1.neutron, nDest);
+      const w1 = b1.checkWinner();
+
+      if (w1 !== null) {
+        const nScore = w1 === this.player ? 1000 + depth : -1000 - depth;
+        if (isMaximizing) {
+          best = Math.max(best, nScore);
+          alpha = Math.max(alpha, nScore);
+        } else {
+          best = Math.min(best, nScore);
+          beta = Math.min(beta, nScore);
+        }
+        if (beta <= alpha) return best;
+        continue;
+      }
+
+      const sMoves = this._orderSoldierMoves(b1, mover);
+      let hasSoldierMoves = false;
+
+      for (const [s, sd] of sMoves) {
+        if (this.timedOut) return best;
+        hasSoldierMoves = true;
+
+        const b2 = b1.copy();
+        b2.move(s, sd);
+        const w2 = b2.checkWinner();
+        let score;
+        if (w2 === this.player) {
+          score = 1000 + depth;
+        } else if (w2 === this.opponent) {
+          score = -1000 - depth;
+        } else {
+          score = this._minimax(b2, depth - 1, !isMaximizing, alpha, beta);
+        }
+
+        if (isMaximizing) {
+          best = Math.max(best, score);
+          alpha = Math.max(alpha, score);
+        } else {
+          best = Math.min(best, score);
+          beta = Math.min(beta, score);
+        }
+        if (beta <= alpha) return best;
+      }
+
+      if (!hasSoldierMoves) {
+        const noMoveScore = isMaximizing ? -1000 - depth : 1000 + depth;
+        if (isMaximizing) {
+          best = Math.max(best, noMoveScore);
+          alpha = Math.max(alpha, noMoveScore);
+        } else {
+          best = Math.min(best, noMoveScore);
+          beta = Math.min(beta, noMoveScore);
+        }
+        if (beta <= alpha) return best;
+      }
+    }
+
+    return best;
+  }
+
+  // move ordering: try moves that push neutron toward our home row first
+  _orderNeutronMoves(board, slides) {
+    const myRow = board.homeRow[this.player];
+    return [...slides].sort((a, b) => {
+      const aDist = Math.abs(a.row - myRow);
+      const bDist = Math.abs(b.row - myRow);
+      return aDist - bDist;
+    });
+  }
+
+  // move ordering: try soldier moves that score well heuristically
+  _orderSoldierMoves(board, mover) {
+    const moves = [];
+    for (const s of board.soldiers[mover]) {
+      for (const sd of board.getSlides(s)) {
+        moves.push([s, sd]);
+      }
+    }
+    // sort by proximity to neutron (soldiers near neutron = more control)
+    const nc = board.neutron.col, nr = board.neutron.row;
+    moves.sort((a, b) => {
+      const aDist = Math.abs(a[1].col - nc) + Math.abs(a[1].row - nr);
+      const bDist = Math.abs(b[1].col - nc) + Math.abs(b[1].row - nr);
+      return aDist - bDist;
+    });
+    return moves;
+  }
+
+  _evaluate(board) {
+    const myRow = board.homeRow[this.player];
+    const oppRow = board.homeRow[this.opponent];
+    const nRow = board.neutron.row;
+
+    const myDist = Math.abs(nRow - myRow);
+    const oppDist = Math.abs(nRow - oppRow);
+    let score = (oppDist - myDist) * 20;
+
+    let myMobility = 0, oppMobility = 0;
+    for (const s of board.soldiers[this.player]) myMobility += board.getSlides(s).length;
+    for (const s of board.soldiers[this.opponent]) oppMobility += board.getSlides(s).length;
+    score += (myMobility - oppMobility) * 3;
+
+    // neutron mobility — fewer moves for opponent to exploit is good
+    const nMoves = board.getSlides(board.neutron).length;
+    // if neutron is near our home with few escape routes, that's good for us
+    if (myDist <= 1) score += (8 - nMoves) * 2;
+
+    for (const s of board.soldiers[this.player]) {
+      const d = Math.abs(s.col - board.neutron.col) + Math.abs(s.row - board.neutron.row);
+      score += Math.max(0, 5 - d) * 2;
+    }
+    for (const s of board.soldiers[this.opponent]) {
+      const d = Math.abs(s.col - board.neutron.col) + Math.abs(s.row - board.neutron.row);
+      score -= Math.max(0, 5 - d) * 2;
+    }
+
+    return score;
+  }
+}
+
+// --- coordinate helpers --------------------------------------------------
+
+function cellCenter(col, row) {
+  // row 0 = bottom of display. Screen y increases downward, so flip.
+  const x = PAD + col * CELL + CELL / 2;
+  const y = PAD + (GRID - 1 - row) * CELL + CELL / 2;
+  return {x, y};
+}
+
+function screenToGrid(mx, my) {
+  const col = Math.floor((mx - PAD) / CELL);
+  const row = GRID - 1 - Math.floor((my - PAD) / CELL);
+  if (col < 0 || col >= GRID || row < 0 || row >= GRID) return null;
+  return {col, row};
+}
+
+function posEq(a, b) { return a && b && a.col === b.col && a.row === b.row; }
+
+function notation(pos) { return COL_LABELS[pos.col] + (pos.row + 1); }
+
+// --- p5.js sketch --------------------------------------------------------
+
+function setup() {
+  const canvas = createCanvas(CANVAS_W, CANVAS_H);
+  canvas.parent('sketch-holder');
+  textFont('Segoe UI, system-ui, sans-serif');
+  phase = PHASE_MENU;
+  statusText = 'Click to choose who goes first';
+}
+
+function draw() {
+  background(C_BG);
+
+  if (phase === PHASE_MENU) {
+    drawMenu();
+    return;
+  }
+
+  drawBoard();
+  drawPieces();
+  drawHighlights();
+  drawLabels();
+  drawStatus();
+
+  // animate sliding piece
+  if (anim) {
+    const elapsed = millis() - anim.startTime;
+    const t = constrain(elapsed / ANIM_DURATION, 0, 1);
+    const cx = lerp(anim.fromX, anim.toX, t);
+    const cy = lerp(anim.fromY, anim.toY, t);
+    drawPieceAt(cx, cy, anim.piece);
+    if (t >= 1) {
+      const cb = anim.onComplete;
+      anim = null;
+      if (cb) cb();
+    }
+  }
+}
+
+// --- menu ----------------------------------------------------------------
+
+function drawMenu() {
+  textAlign(CENTER, CENTER);
+
+  // title
+  fill(C_NEUTRON);
+  textSize(42);
+  textStyle(BOLD);
+  text('N E U T R O N', CANVAS_W / 2, 80);
+
+  // rules
+  fill(C_TEXT);
+  textSize(15);
+  textStyle(NORMAL);
+  const rules = [
+    'Each turn: slide the neutron, then slide one of your soldiers.',
+    'Pieces slide in any direction until hitting the edge or another piece.',
+    'Win by getting the neutron to YOUR home row (bottom).',
+    'If you cannot move the neutron on your turn, you lose!',
+  ];
+  rules.forEach((line, i) => text(line, CANVAS_W / 2, 140 + i * 24));
+
+  // difficulty toggle
+  const diffY = 250;
+  textSize(14);
+  textStyle(NORMAL);
+  fill(C_TEXT);
+  textAlign(RIGHT, CENTER);
+  text('Difficulty:', CANVAS_W / 2 - 85, diffY);
+
+  const radioR = 8;
+  const opts = [
+    { key: 'easy',         label: 'Easy',         x: CANVAS_W / 2 - 65 },
+    { key: 'intermediate', label: 'Intermediate',  x: CANVAS_W / 2 + 10 },
+    { key: 'advanced',     label: 'Advanced',      x: CANVAS_W / 2 + 130 },
+  ];
+
+  for (const opt of opts) {
+    stroke(C_TEXT);
+    strokeWeight(2);
+    noFill();
+    ellipse(opt.x, diffY, radioR * 2, radioR * 2);
+    if (difficulty === opt.key) { fill(C_NEUTRON); noStroke(); ellipse(opt.x, diffY, radioR, radioR); }
+    fill(C_TEXT); noStroke();
+    textAlign(LEFT, CENTER);
+    text(opt.label, opt.x + 14, diffY);
+  }
+
+  textAlign(CENTER, CENTER);
+
+  // buttons
+  const btnY = 300;
+  const btnW = 180, btnH = 50;
+
+  // "Go First" button
+  const b1x = CANVAS_W / 2 - btnW - 15;
+  fill(C_HUMAN);
+  rect(b1x, btnY, btnW, btnH, 10);
+  fill('#000');
+  textSize(18);
+  textStyle(BOLD);
+  text('Go First', b1x + btnW / 2, btnY + btnH / 2);
+
+  // "Go Second" button
+  const b2x = CANVAS_W / 2 + 15;
+  fill(C_AI);
+  rect(b2x, btnY, btnW, btnH, 10);
+  fill('#fff');
+  text('Go Second', b2x + btnW / 2, btnY + btnH / 2);
+
+  // piece legend
+  fill(C_TEXT);
+  textSize(14);
+  textStyle(NORMAL);
+  text('Your soldiers are at the bottom of the board.', CANVAS_W / 2, 380);
+}
+
+// --- board drawing -------------------------------------------------------
+
+function drawBoard() {
+  // board background
+  for (let r = 0; r < GRID; r++) {
+    for (let c = 0; c < GRID; c++) {
+      const {x, y} = cellCenter(c, r);
+      fill((c + r) % 2 === 0 ? C_BOARD : C_BOARD_ALT);
+      noStroke();
+      rect(x - CELL / 2, y - CELL / 2, CELL, CELL);
+    }
+  }
+
+  // grid lines
+  stroke(C_LINE);
+  strokeWeight(2);
+  for (let i = 0; i <= GRID; i++) {
+    const px = PAD + i * CELL;
+    const py = PAD + i * CELL;
+    line(PAD, py, PAD + GRID * CELL, py);
+    line(px, PAD, px, PAD + GRID * CELL);
+  }
+}
+
+function drawPieces() {
+  noStroke();
+  for (let r = 0; r < GRID; r++) {
+    for (let c = 0; c < GRID; c++) {
+      const ch = board.grid[r][c];
+      if (ch === ' ') continue;
+      // skip piece being animated — it's drawn separately at interpolated pos
+      if (anim && anim.gridTo && c === anim.gridTo.col && r === anim.gridTo.row) continue;
+      const {x, y} = cellCenter(c, r);
+      drawPieceAt(x, y, ch);
+    }
+  }
+}
+
+function drawPieceAt(x, y, ch) {
+  noStroke();
+  if (ch === 'N') {
+    drawGlow(x, y, C_NEUTRON);
+    push();
+    translate(x, y);
+    rotate(PI / 4);
+    fill(C_NEUTRON);
+    noStroke();
+    rectMode(CENTER);
+    rect(0, 0, PIECE_R * 1.4, PIECE_R * 1.4, 4);
+    fill('#fff176');
+    rect(-2, -2, PIECE_R * 0.7, PIECE_R * 0.7, 2);
+    pop();
+  } else {
+    const isHuman = parseInt(ch) === humanPlayer;
+    const col = isHuman ? C_HUMAN : C_AI;
+    drawGlow(x, y, col);
+    fill(col);
+    ellipse(x, y, PIECE_R * 1.8, PIECE_R * 1.8);
+    fill(isHuman ? '#81d4fa' : '#ef9a9a');
+    ellipse(x - 4, y - 4, PIECE_R * 1.0, PIECE_R * 1.0);
+  }
+}
+
+function drawGlow(x, y, col) {
+  push();
+  noStroke();
+  for (let i = 3; i > 0; i--) {
+    fill(red(color(col)), green(color(col)), blue(color(col)), 30);
+    ellipse(x, y, PIECE_R * 1.8 + i * 8, PIECE_R * 1.8 + i * 8);
+  }
+  pop();
+}
+
+function drawHighlights() {
+  // highlight valid destinations
+  for (const d of validDests) {
+    const {x, y} = cellCenter(d.col, d.row);
+    fill(C_VALID);
+    noStroke();
+    ellipse(x, y, CELL * 0.6, CELL * 0.6);
+  }
+
+  // highlight selected soldier
+  if (selectedSoldier) {
+    const {x, y} = cellCenter(selectedSoldier.col, selectedSoldier.row);
+    noFill();
+    stroke(255);
+    strokeWeight(3);
+    ellipse(x, y, PIECE_R * 2.1, PIECE_R * 2.1);
+  }
+
+  // highlight neutron when it's neutron-move phase
+  if (phase === PHASE_HUMAN_NEUTRON) {
+    const {x, y} = cellCenter(board.neutron.col, board.neutron.row);
+    push();
+    translate(x, y);
+    rotate(PI / 4);
+    noFill();
+    stroke(255);
+    strokeWeight(3);
+    rectMode(CENTER);
+    rect(0, 0, PIECE_R * 1.7, PIECE_R * 1.7, 4);
+    pop();
+  }
+}
+
+function drawLabels() {
+  fill(C_TEXT);
+  noStroke();
+  textSize(14);
+  textStyle(NORMAL);
+  textAlign(CENTER, CENTER);
+
+  // column labels (a-e)
+  for (let c = 0; c < GRID; c++) {
+    const {x} = cellCenter(c, 0);
+    text(COL_LABELS[c], x, PAD + GRID * CELL + 16);
+  }
+
+  // row labels (1-5, bottom to top)
+  textAlign(RIGHT, CENTER);
+  for (let r = 0; r < GRID; r++) {
+    const {y} = cellCenter(0, r);
+    text(r + 1, PAD - 10, y);
+  }
+}
+
+function drawStatus() {
+  textAlign(CENTER, CENTER);
+  textStyle(NORMAL);
+
+  if (phase === PHASE_GAME_OVER) {
+    const isWin = winner === humanPlayer;
+    fill(isWin ? '#4caf50' : C_AI);
+    textSize(24);
+    textStyle(BOLD);
+    const msg = isWin ? 'You win!' : 'Computer wins!';
+    text(msg, CANVAS_W / 2, PAD + GRID * CELL + 48);
+    fill(C_TEXT);
+    textSize(14);
+    textStyle(NORMAL);
+    if (winReason) text(winReason, CANVAS_W / 2, PAD + GRID * CELL + 72);
+    text('Click anywhere to play again', CANVAS_W / 2, PAD + GRID * CELL + 92);
+    return;
+  }
+
+  fill(C_TEXT);
+  textSize(16);
+  text(statusText, CANVAS_W / 2, PAD + GRID * CELL + 48);
+}
+
+// --- input ---------------------------------------------------------------
+
+function mouseMoved() {
+  if (phase === PHASE_HUMAN_NEUTRON && !neutronSelected) {
+    const g = screenToGrid(mouseX, mouseY);
+    if (g && posEq(g, board.neutron)) {
+      validDests = board.getSlides(board.neutron);
+    } else {
+      validDests = [];
+    }
+  }
+  if ((phase === PHASE_HUMAN_SOLDIER_SELECT || phase === PHASE_HUMAN_SOLDIER_DEST) && !selectedSoldier) {
+    const g = screenToGrid(mouseX, mouseY);
+    const isMySoldier = g && board.soldiers[humanPlayer].some(
+      s => s.col === g.col && s.row === g.row
+    );
+    if (isMySoldier && board.getSlides(g).length > 0) {
+      validDests = board.getSlides(g);
+    } else {
+      validDests = [];
+    }
+  }
+}
+
+function mousePressed() {
+  if (phase === PHASE_MENU) {
+    handleMenuClick();
+    return;
+  }
+
+  if (phase === PHASE_GAME_OVER) {
+    // restart
+    phase = PHASE_MENU;
+    return;
+  }
+
+  if (phase === PHASE_HUMAN_NEUTRON) {
+    handleNeutronClick();
+    return;
+  }
+
+  if (phase === PHASE_HUMAN_SOLDIER_SELECT) {
+    handleSoldierSelectClick();
+    return;
+  }
+
+  if (phase === PHASE_HUMAN_SOLDIER_DEST) {
+    handleSoldierDestClick();
+    return;
+  }
+}
+
+function handleMenuClick() {
+  // difficulty radio buttons
+  const diffY = 250;
+  const hitR = 20;
+  const opts = [
+    { key: 'easy',         x: CANVAS_W / 2 - 65,  labelW: 40 },
+    { key: 'intermediate', x: CANVAS_W / 2 + 10,   labelW: 90 },
+    { key: 'advanced',     x: CANVAS_W / 2 + 130,  labelW: 70 },
+  ];
+
+  for (const opt of opts) {
+    if (dist(mouseX, mouseY, opt.x, diffY) < hitR ||
+        (mouseX >= opt.x && mouseX <= opt.x + opt.labelW && Math.abs(mouseY - diffY) < hitR)) {
+      difficulty = opt.key;
+      return;
+    }
+  }
+
+  const btnY = 300, btnW = 180, btnH = 50;
+  const b1x = CANVAS_W / 2 - btnW - 15;
+  const b2x = CANVAS_W / 2 + 15;
+
+  if (mouseX >= b1x && mouseX <= b1x + btnW && mouseY >= btnY && mouseY <= btnY + btnH) {
+    startGame(true);
+  } else if (mouseX >= b2x && mouseX <= b2x + btnW && mouseY >= btnY && mouseY <= btnY + btnH) {
+    startGame(false);
+  }
+}
+
+function handleNeutronClick() {
+  const g = screenToGrid(mouseX, mouseY);
+  if (!g) return;
+
+  // click the neutron to lock highlights on
+  if (!neutronSelected && posEq(g, board.neutron)) {
+    neutronSelected = true;
+    validDests = board.getSlides(board.neutron);
+    statusText = 'Click a destination for the neutron';
+    return;
+  }
+
+  // click a valid destination to move
+  if (validDests.some(d => d.col === g.col && d.row === g.row)) {
+    board.move(board.neutron, g);
+    validDests = [];
+    neutronSelected = false;
+
+    const w = board.checkWinner();
+    if (w !== null) {
+      endGame(w);
+      return;
+    }
+
+    beginHumanSoldierPhase();
+  }
+}
+
+function handleSoldierSelectClick() {
+  const g = screenToGrid(mouseX, mouseY);
+  if (!g) return;
+
+  const isMySoldier = board.soldiers[humanPlayer].some(
+    s => s.col === g.col && s.row === g.row
+  );
+  if (isMySoldier && board.getSlides(g).length > 0) {
+    selectedSoldier = g;
+    validDests = board.getSlides(g);
+    phase = PHASE_HUMAN_SOLDIER_DEST;
+    statusText = `Soldier ${notation(g)} selected — click a destination`;
+  }
+}
+
+function handleSoldierDestClick() {
+  const g = screenToGrid(mouseX, mouseY);
+  if (!g) return;
+
+  // clicked a valid destination?
+  if (validDests.some(d => d.col === g.col && d.row === g.row)) {
+    board.move(selectedSoldier, g);
+    selectedSoldier = null;
+    validDests = [];
+
+    currentPlayer = aiPlayer;
+    firstTurn = false;
+    beginAITurn();
+    return;
+  }
+
+  // clicked a different soldier? switch selection
+  const isMySoldier = board.soldiers[humanPlayer].some(
+    s => s.col === g.col && s.row === g.row
+  );
+  if (isMySoldier && !posEq(g, selectedSoldier) && board.getSlides(g).length > 0) {
+    selectedSoldier = g;
+    validDests = board.getSlides(g);
+    statusText = `Soldier ${notation(g)} selected — click a destination`;
+    return;
+  }
+
+  // clicked elsewhere — deselect, go back to hover mode
+  selectedSoldier = null;
+  validDests = [];
+  phase = PHASE_HUMAN_SOLDIER_SELECT;
+  statusText = 'Hover over a soldier to see moves';
+}
+
+// --- game flow -----------------------------------------------------------
+
+function startGame(goFirst) {
+  if (goFirst) {
+    humanPlayer = 1;
+    aiPlayer = 2;
+  } else {
+    humanPlayer = 2;
+    aiPlayer = 1;
+  }
+
+  board = new Board(humanPlayer);
+  currentPlayer = 1;   // player 1 always moves first
+  firstTurn = true;
+  winner = null;
+  winReason = '';
+  selectedSoldier = null;
+  validDests = [];
+  aiInstance = null;
+
+  if (currentPlayer === humanPlayer) {
+    beginHumanSoldierPhase();  // first turn: soldier only
+  } else {
+    beginAITurn();
+  }
+}
+
+function beginHumanNeutronPhase() {
+  if (!board.neutronCanMove()) {
+    endGame(aiPlayer, 'Neutron is blocked');
+    return;
+  }
+  phase = PHASE_HUMAN_NEUTRON;
+  validDests = [];  // shown on hover over the neutron
+  neutronSelected = false;
+  statusText = 'Hover over the neutron to see moves';
+}
+
+function beginHumanSoldierPhase() {
+  if (!board.hasSoldierMove(humanPlayer)) {
+    endGame(aiPlayer, 'No soldier moves available');
+    return;
+  }
+  phase = PHASE_HUMAN_SOLDIER_SELECT;
+  validDests = [];
+  selectedSoldier = null;
+  statusText = 'Hover over a soldier to see moves';
+}
+
+function animateSlide(from, to, piece, onComplete) {
+  const fromScreen = cellCenter(from.col, from.row);
+  const toScreen = cellCenter(to.col, to.row);
+  anim = {
+    fromX: fromScreen.x, fromY: fromScreen.y,
+    toX: toScreen.x, toY: toScreen.y,
+    startTime: millis(),
+    piece: piece,
+    gridTo: to,
+    onComplete: onComplete
+  };
+}
+
+function beginAITurn() {
+  phase = PHASE_AI_THINKING;
+  validDests = [];
+  selectedSoldier = null;
+  statusText = 'Computer is thinking...';
+
+  // use setTimeout so the UI updates before AI blocks
+  setTimeout(() => {
+    const ai = difficulty === 'advanced' ? new AdvancedAI(aiPlayer)
+             : difficulty === 'intermediate' ? new MinimaxAI(aiPlayer, 3)
+             : new SimpleAI(aiPlayer);
+    const opponent = humanPlayer;
+
+    if (firstTurn && currentPlayer === 1) {
+      // AI first turn: soldier only — find safe move
+      const candidates = [];
+      for (const s of board.soldiers[aiPlayer]) {
+        for (const d of board.getSlides(s)) candidates.push([s, d]);
+      }
+      const safe = candidates.filter(([f, t]) => {
+        const b = board.copy();
+        b.move(f, t);
+        if (b.checkWinner() === opponent) return false;
+        for (const nd of b.getSlides(b.neutron)) {
+          const b2 = b.copy();
+          b2.move(b2.neutron, nd);
+          if (b2.checkWinner() === opponent) return false;
+        }
+        return true;
+      });
+      const chosen = safe.length ? safe[Math.floor(Math.random() * safe.length)]
+                                 : candidates[Math.floor(Math.random() * candidates.length)];
+
+      // animate the soldier slide
+      const piece = board.grid[chosen[0].row][chosen[0].col];
+      phase = PHASE_AI_ANIMATING;
+      statusText = `Computer moves ${notation(chosen[0])} to ${notation(chosen[1])}`;
+      board.move(chosen[0], chosen[1]);
+      animateSlide(chosen[0], chosen[1], piece, () => {
+        currentPlayer = humanPlayer;
+        firstTurn = false;
+        beginHumanNeutronPhase();
+      });
+      return;
+    }
+
+    // Normal AI turn: neutron + soldier
+
+    if (!board.neutronCanMove()) {
+      endGame(humanPlayer, 'Neutron is blocked');
+      return;
+    }
+
+    const nFrom = {...board.neutron};
+    const nDest = ai.chooseNeutronMove(board);
+    board.move(board.neutron, nDest);
+
+    // animate neutron slide, then check winner, then soldier
+    phase = PHASE_AI_ANIMATING;
+    statusText = `Computer moves neutron to ${notation(nDest)}`;
+    animateSlide(nFrom, nDest, 'N', () => {
+      // check winner after neutron
+      const w = board.checkWinner();
+      if (w !== null) {
+        endGame(w);
+        return;
+      }
+
+      if (!board.hasSoldierMove(aiPlayer)) {
+        endGame(humanPlayer, 'Computer has no soldier moves');
+        return;
+      }
+
+      const [sFrom, sTo] = ai.chooseSoldierMove(board);
+      const sPiece = board.grid[sFrom.row][sFrom.col];
+      board.move(sFrom, sTo);
+
+      // brief pause then animate soldier slide
+      statusText = `Computer moves ${notation(sFrom)} to ${notation(sTo)}`;
+      setTimeout(() => {
+        animateSlide(sFrom, sTo, sPiece, () => {
+          statusText = `Computer: N to ${notation(nDest)}, ${notation(sFrom)} to ${notation(sTo)}`;
+          currentPlayer = humanPlayer;
+          firstTurn = false;
+          beginHumanNeutronPhase();
+        });
+      }, 200);
+    });
+  }, 300);
+}
+
+function endGame(w, reason) {
+  phase = PHASE_GAME_OVER;
+  winner = w;
+  winReason = reason || '';
+  validDests = [];
+  selectedSoldier = null;
+}
+</script>
+</body>
+</html>
