@@ -31,7 +31,9 @@ const GRID = 5;
 const CELL = 90;
 const PAD = 40;                       // padding around board for labels
 const PIECE_R = 32;                   // piece radius
-const CANVAS_W = GRID * CELL + PAD * 2;
+const BOARD_W = GRID * CELL + PAD * 2;
+const RECORD_W = 210;                 // game record pane width
+const CANVAS_W = BOARD_W + RECORD_W;
 const CANVAS_H = GRID * CELL + PAD * 2 + 80; // extra for status text
 
 const DIRS = [
@@ -80,7 +82,17 @@ let neutronSelected = false; // true once player clicks the neutron
 let winner = null;
 let winReason = '';
 let aiInstance = null;
-let difficulty = 'easy'; // 'easy' or 'intermediate'
+let difficulty = 'easy'; // 'easy', 'intermediate', or 'advanced'
+let autoRestart = false;
+let lastGoFirst = true;       // remember choice for auto-restart
+let gameRecord = [];          // [{p1: '...', p2: '...'}, ...]
+let pendingNeutronNote = '';  // neutron notation waiting for soldier move
+
+// drag state: { gridPos, piece, offsetX, offsetY } or null
+let drag = null;
+
+// undo state: snapshots taken at the start of each human turn
+let undoStack = []; // [{ board, currentPlayer, firstTurn, gameRecord, pendingNeutronNote }]
 
 // --- animation state -----------------------------------------------------
 // When non-null, a piece is sliding on screen.
@@ -741,6 +753,10 @@ function draw() {
   drawHighlights();
   drawLabels();
   drawStatus();
+  drawRecord();
+  drawResignButton();
+  drawAutoRestart();
+  drawUndoButton();
 
   // animate sliding piece
   if (anim) {
@@ -755,6 +771,11 @@ function draw() {
       if (cb) cb();
     }
   }
+
+  // draw dragged piece at cursor
+  if (drag) {
+    drawPieceAt(mouseX + drag.offsetX, mouseY + drag.offsetY, drag.piece);
+  }
 }
 
 // --- menu ----------------------------------------------------------------
@@ -766,7 +787,7 @@ function drawMenu() {
   fill(C_NEUTRON);
   textSize(42);
   textStyle(BOLD);
-  text('N E U T R O N', CANVAS_W / 2, 80);
+  text('N E U T R O N', BOARD_W / 2, 80);
 
   // rules
   fill(C_TEXT);
@@ -778,7 +799,7 @@ function drawMenu() {
     'Win by getting the neutron to YOUR home row (bottom).',
     'If you cannot move the neutron on your turn, you lose!',
   ];
-  rules.forEach((line, i) => text(line, CANVAS_W / 2, 140 + i * 24));
+  rules.forEach((line, i) => text(line, BOARD_W / 2, 140 + i * 24));
 
   // difficulty toggle
   const diffY = 250;
@@ -786,13 +807,13 @@ function drawMenu() {
   textStyle(NORMAL);
   fill(C_TEXT);
   textAlign(RIGHT, CENTER);
-  text('Difficulty:', CANVAS_W / 2 - 85, diffY);
+  text('Difficulty:', BOARD_W / 2 - 85, diffY);
 
   const radioR = 8;
   const opts = [
-    { key: 'easy',         label: 'Easy',         x: CANVAS_W / 2 - 65 },
-    { key: 'intermediate', label: 'Intermediate',  x: CANVAS_W / 2 + 10 },
-    { key: 'advanced',     label: 'Advanced',      x: CANVAS_W / 2 + 130 },
+    { key: 'easy',         label: 'Easy',         x: BOARD_W / 2 - 65 },
+    { key: 'intermediate', label: 'Intermediate',  x: BOARD_W / 2 + 10 },
+    { key: 'advanced',     label: 'Advanced',      x: BOARD_W / 2 + 130 },
   ];
 
   for (const opt of opts) {
@@ -813,7 +834,7 @@ function drawMenu() {
   const btnW = 180, btnH = 50;
 
   // "Go First" button
-  const b1x = CANVAS_W / 2 - btnW - 15;
+  const b1x = BOARD_W / 2 - btnW - 15;
   fill(C_HUMAN);
   rect(b1x, btnY, btnW, btnH, 10);
   fill('#000');
@@ -822,7 +843,7 @@ function drawMenu() {
   text('Go First', b1x + btnW / 2, btnY + btnH / 2);
 
   // "Go Second" button
-  const b2x = CANVAS_W / 2 + 15;
+  const b2x = BOARD_W / 2 + 15;
   fill(C_AI);
   rect(b2x, btnY, btnW, btnH, 10);
   fill('#fff');
@@ -832,7 +853,8 @@ function drawMenu() {
   fill(C_TEXT);
   textSize(14);
   textStyle(NORMAL);
-  text('Your soldiers are at the bottom of the board.', CANVAS_W / 2, 380);
+  textAlign(CENTER, CENTER);
+  text('Your soldiers are at the bottom of the board.', BOARD_W / 2, 370);
 }
 
 // --- board drawing -------------------------------------------------------
@@ -865,8 +887,9 @@ function drawPieces() {
     for (let c = 0; c < GRID; c++) {
       const ch = board.grid[r][c];
       if (ch === ' ') continue;
-      // skip piece being animated — it's drawn separately at interpolated pos
+      // skip piece being animated or dragged
       if (anim && anim.gridTo && c === anim.gridTo.col && r === anim.gridTo.row) continue;
+      if (drag && c === drag.gridPos.col && r === drag.gridPos.row) continue;
       const {x, y} = cellCenter(c, r);
       drawPieceAt(x, y, ch);
     }
@@ -972,27 +995,157 @@ function drawStatus() {
     textSize(24);
     textStyle(BOLD);
     const msg = isWin ? 'You win!' : 'Computer wins!';
-    text(msg, CANVAS_W / 2, PAD + GRID * CELL + 48);
+    text(msg, BOARD_W / 2, PAD + GRID * CELL + 48);
     fill(C_TEXT);
     textSize(14);
     textStyle(NORMAL);
-    if (winReason) text(winReason, CANVAS_W / 2, PAD + GRID * CELL + 72);
-    text('Click anywhere to play again', CANVAS_W / 2, PAD + GRID * CELL + 92);
+    if (winReason) text(winReason, BOARD_W / 2, PAD + GRID * CELL + 72);
+    text(autoRestart ? 'Restarting...' : 'Click anywhere to play again',
+         BOARD_W / 2, PAD + GRID * CELL + 92);
     return;
   }
 
   fill(C_TEXT);
   textSize(16);
-  text(statusText, CANVAS_W / 2, PAD + GRID * CELL + 48);
+  text(statusText, BOARD_W / 2, PAD + GRID * CELL + 48);
+}
+
+function drawRecord() {
+  const rx = BOARD_W + 10;
+  const rw = RECORD_W - 20;
+  const ry = PAD;
+
+  // header
+  fill(C_TEXT);
+  noStroke();
+  textSize(14);
+  textStyle(BOLD);
+  textAlign(CENTER, TOP);
+  text('Game Record', rx + rw / 2, ry);
+
+  // column headers
+  textSize(11);
+  textStyle(NORMAL);
+  const colW = rw / 2;
+  const p1Label = humanPlayer === 1 ? 'You' : 'CPU';
+  const p2Label = humanPlayer === 2 ? 'You' : 'CPU';
+  fill('#888');
+  textAlign(LEFT, TOP);
+  text('#', rx, ry + 22);
+  text(p1Label, rx + 22, ry + 22);
+  text(p2Label, rx + 22 + colW, ry + 22);
+
+  // divider line
+  stroke('#444');
+  strokeWeight(1);
+  line(rx, ry + 38, rx + rw, ry + 38);
+
+  // rows
+  fill(C_TEXT);
+  noStroke();
+  textSize(12);
+  textStyle(NORMAL);
+  const lineH = 18;
+  const maxRows = Math.floor((CANVAS_H - ry - 60) / lineH);
+  const startIdx = Math.max(0, gameRecord.length - maxRows);
+
+  for (let i = startIdx; i < gameRecord.length; i++) {
+    const rec = gameRecord[i];
+    const y = ry + 42 + (i - startIdx) * lineH;
+    textAlign(LEFT, TOP);
+    fill('#888');
+    text(`${i + 1}.`, rx, y);
+    fill(C_TEXT);
+    text(rec.p1 || '', rx + 22, y);
+    text(rec.p2 || '', rx + 22 + colW, y);
+  }
+}
+
+function drawResignButton() {
+  if (phase === PHASE_MENU || phase === PHASE_GAME_OVER) return;
+  const bx = BOARD_W - PAD - 60;
+  const by = PAD + GRID * CELL + 62;
+  const bw = 60, bh = 22;
+
+  fill('#555');
+  noStroke();
+  rect(bx, by, bw, bh, 4);
+  fill(C_TEXT);
+  textSize(11);
+  textAlign(CENTER, CENTER);
+  textStyle(NORMAL);
+  text('Resign', bx + bw / 2, by + bh / 2);
+}
+
+const UNDO_X = BOARD_W - PAD - 14;
+const UNDO_Y = PAD - 18;
+const UNDO_R = 16; // click radius
+
+function drawUndoButton() {
+  if (phase === PHASE_MENU) return;
+  const enabled = undoStack.length > 0 && !anim;
+  const col = enabled ? C_TEXT : '#555';
+
+  push();
+  translate(UNDO_X, UNDO_Y);
+
+  // background circle for click target
+  fill(enabled ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0)');
+  noStroke();
+  ellipse(0, 0, UNDO_R * 2, UNDO_R * 2);
+
+  // circular arrow
+  stroke(col);
+  strokeWeight(2.5);
+  noFill();
+  arc(0, 0, 18, 18, -PI * 0.75, PI * 0.55);
+
+  // arrowhead
+  const tip = PI * 0.55;
+  const tx = 9 * cos(tip);
+  const ty = 9 * sin(tip);
+  fill(col);
+  noStroke();
+  push();
+  translate(tx, ty);
+  rotate(tip + PI * 0.3);
+  triangle(-4, -2, 4, -2, 0, 5);
+  pop();
+
+  pop();
+}
+
+function drawAutoRestart() {
+  const arX = PAD + 2;
+  const arY = PAD - 18;
+
+  stroke(C_TEXT);
+  strokeWeight(1.5);
+  noFill();
+  rect(arX, arY - 6, 12, 12, 2);
+  if (autoRestart) {
+    stroke(C_NEUTRON);
+    strokeWeight(2.5);
+    line(arX + 2, arY + 1, arX + 5, arY + 4);
+    line(arX + 5, arY + 4, arX + 10, arY - 3);
+  }
+  fill('#888'); noStroke();
+  textAlign(LEFT, CENTER);
+  textSize(11);
+  textStyle(NORMAL);
+  text('Auto-restart', arX + 17, arY);
 }
 
 // --- input ---------------------------------------------------------------
 
 function mouseMoved() {
+  let showGrab = false;
+
   if (phase === PHASE_HUMAN_NEUTRON && !neutronSelected) {
     const g = screenToGrid(mouseX, mouseY);
     if (g && posEq(g, board.neutron)) {
       validDests = board.getSlides(board.neutron);
+      showGrab = true;
     } else {
       validDests = [];
     }
@@ -1004,10 +1157,13 @@ function mouseMoved() {
     );
     if (isMySoldier && board.getSlides(g).length > 0) {
       validDests = board.getSlides(g);
+      showGrab = true;
     } else {
       validDests = [];
     }
   }
+
+  cursor(showGrab ? 'grab' : 'default');
 }
 
 function mousePressed() {
@@ -1016,12 +1172,84 @@ function mousePressed() {
     return;
   }
 
+  // auto-restart checkbox (above board, visible during gameplay and game over)
+  if (phase !== PHASE_MENU) {
+    const arX = PAD + 2;
+    const arY = PAD - 18;
+    if (mouseX >= arX && mouseX <= arX + 90 && mouseY >= arY - 10 && mouseY <= arY + 10) {
+      autoRestart = !autoRestart;
+      return;
+    }
+  }
+
+  // undo button check (above right corner of board)
+  if (phase !== PHASE_MENU && !anim) {
+    if (dist(mouseX, mouseY, UNDO_X, UNDO_Y) < UNDO_R && undoStack.length > 0) {
+      performUndo();
+      return;
+    }
+  }
+
   if (phase === PHASE_GAME_OVER) {
-    // restart
-    phase = PHASE_MENU;
+    if (!autoRestart) phase = PHASE_MENU;
     return;
   }
 
+  // resign button check (during gameplay)
+  if (phase !== PHASE_MENU && phase !== PHASE_GAME_OVER) {
+    const bx = BOARD_W - PAD - 60;
+    const by = PAD + GRID * CELL + 62;
+    if (mouseX >= bx && mouseX <= bx + 60 && mouseY >= by && mouseY <= by + 22) {
+      recordMove(humanPlayer, 'resigns');
+      endGame(aiPlayer, 'You resigned');
+      return;
+    }
+  }
+
+  // try to start a drag on a movable piece
+  const g = screenToGrid(mouseX, mouseY);
+  if (g) {
+    let canDrag = false;
+    let piece = null;
+
+    if (phase === PHASE_HUMAN_NEUTRON && posEq(g, board.neutron)) {
+      canDrag = true;
+      piece = 'N';
+    } else if ((phase === PHASE_HUMAN_SOLDIER_SELECT || phase === PHASE_HUMAN_SOLDIER_DEST)) {
+      const isMySoldier = board.soldiers[humanPlayer].some(
+        s => s.col === g.col && s.row === g.row
+      );
+      if (isMySoldier && board.getSlides(g).length > 0) {
+        canDrag = true;
+        piece = board.grid[g.row][g.col];
+      }
+    }
+
+    if (canDrag) {
+      const center = cellCenter(g.col, g.row);
+      drag = {
+        gridPos: g,
+        piece: piece,
+        offsetX: center.x - mouseX,
+        offsetY: center.y - mouseY,
+        moved: false  // becomes true on first mouseDragged
+      };
+      // show valid destinations immediately
+      if (piece === 'N') {
+        validDests = board.getSlides(board.neutron);
+        neutronSelected = true;
+        statusText = 'Drag to a destination, or click one';
+      } else {
+        selectedSoldier = g;
+        validDests = board.getSlides(g);
+        phase = PHASE_HUMAN_SOLDIER_DEST;
+        statusText = `Drag to a destination, or click one`;
+      }
+      return;
+    }
+  }
+
+  // fall through to click-based handlers
   if (phase === PHASE_HUMAN_NEUTRON) {
     handleNeutronClick();
     return;
@@ -1038,14 +1266,69 @@ function mousePressed() {
   }
 }
 
+function mouseDragged() {
+  if (drag) {
+    drag.moved = true;
+    cursor('grabbing');
+  }
+}
+
+function mouseReleased() {
+  if (!drag || !drag.moved) {
+    // no drag or didn't move — let click handlers do their thing
+    drag = null;
+    cursor('default');
+    return;
+  }
+  cursor('default');
+
+  const g = screenToGrid(mouseX, mouseY);
+  const isValidDest = g && validDests.some(d => d.col === g.col && d.row === g.row);
+
+  if (isValidDest) {
+    if (drag.piece === 'N') {
+      // complete neutron move
+      pendingNeutronNote = 'N-' + notation(g);
+      board.move(board.neutron, g);
+      validDests = [];
+      neutronSelected = false;
+      drag = null;
+
+      const w = board.checkWinner();
+      if (w !== null) {
+        recordMove(humanPlayer, pendingNeutronNote);
+        pendingNeutronNote = '';
+        endGame(w);
+        return;
+      }
+      beginHumanSoldierPhase();
+    } else {
+      // complete soldier move
+      recordMove(humanPlayer, formatTurn(pendingNeutronNote, drag.gridPos, g));
+      pendingNeutronNote = '';
+      board.move(drag.gridPos, g);
+      selectedSoldier = null;
+      validDests = [];
+      drag = null;
+
+      currentPlayer = aiPlayer;
+      firstTurn = false;
+      beginAITurn();
+    }
+  } else {
+    // cancel drag — snap back
+    drag = null;
+  }
+}
+
 function handleMenuClick() {
   // difficulty radio buttons
   const diffY = 250;
   const hitR = 20;
   const opts = [
-    { key: 'easy',         x: CANVAS_W / 2 - 65,  labelW: 40 },
-    { key: 'intermediate', x: CANVAS_W / 2 + 10,   labelW: 90 },
-    { key: 'advanced',     x: CANVAS_W / 2 + 130,  labelW: 70 },
+    { key: 'easy',         x: BOARD_W / 2 - 65,  labelW: 40 },
+    { key: 'intermediate', x: BOARD_W / 2 + 10,   labelW: 90 },
+    { key: 'advanced',     x: BOARD_W / 2 + 130,  labelW: 70 },
   ];
 
   for (const opt of opts) {
@@ -1057,12 +1340,14 @@ function handleMenuClick() {
   }
 
   const btnY = 300, btnW = 180, btnH = 50;
-  const b1x = CANVAS_W / 2 - btnW - 15;
-  const b2x = CANVAS_W / 2 + 15;
+  const b1x = BOARD_W / 2 - btnW - 15;
+  const b2x = BOARD_W / 2 + 15;
 
   if (mouseX >= b1x && mouseX <= b1x + btnW && mouseY >= btnY && mouseY <= btnY + btnH) {
+    lastGoFirst = true;
     startGame(true);
   } else if (mouseX >= b2x && mouseX <= b2x + btnW && mouseY >= btnY && mouseY <= btnY + btnH) {
+    lastGoFirst = false;
     startGame(false);
   }
 }
@@ -1081,12 +1366,15 @@ function handleNeutronClick() {
 
   // click a valid destination to move
   if (validDests.some(d => d.col === g.col && d.row === g.row)) {
+    pendingNeutronNote = 'N-' + notation(g);
     board.move(board.neutron, g);
     validDests = [];
     neutronSelected = false;
 
     const w = board.checkWinner();
     if (w !== null) {
+      recordMove(humanPlayer, pendingNeutronNote);
+      pendingNeutronNote = '';
       endGame(w);
       return;
     }
@@ -1116,6 +1404,8 @@ function handleSoldierDestClick() {
 
   // clicked a valid destination?
   if (validDests.some(d => d.col === g.col && d.row === g.row)) {
+    recordMove(humanPlayer, formatTurn(pendingNeutronNote, selectedSoldier, g));
+    pendingNeutronNote = '';
     board.move(selectedSoldier, g);
     selectedSoldier = null;
     validDests = [];
@@ -1146,6 +1436,65 @@ function handleSoldierDestClick() {
 
 // --- game flow -----------------------------------------------------------
 
+function recordMove(player, moveText) {
+  if (player === 1) {
+    // player 1 starts a new row
+    gameRecord.push({ p1: moveText, p2: '' });
+  } else {
+    // player 2 fills in the current row
+    if (gameRecord.length === 0) gameRecord.push({ p1: '', p2: '' });
+    gameRecord[gameRecord.length - 1].p2 = moveText;
+  }
+}
+
+function formatTurn(neutronNote, fromPos, toPos) {
+  const soldierNote = notation(fromPos) + '-' + notation(toPos);
+  return neutronNote ? neutronNote + '; ' + soldierNote : soldierNote;
+}
+
+function saveUndoSnapshot() {
+  undoStack.push({
+    board: board.copy(),
+    currentPlayer,
+    firstTurn,
+    gameRecord: gameRecord.map(r => ({...r})),
+    pendingNeutronNote
+  });
+}
+
+function performUndo() {
+  if (undoStack.length === 0) return;
+
+  // If the human hasn't started moving yet this turn (or it's game over/AI phase),
+  // pop twice to undo the previous human+AI round.
+  // If mid-turn (neutron already moved), pop once to undo just the neutron move.
+  const midTurn = pendingNeutronNote !== '';
+  if (!midTurn && undoStack.length >= 2) {
+    undoStack.pop(); // discard current turn's snapshot
+  }
+
+  const snap = undoStack.pop();
+  board = snap.board;
+  currentPlayer = snap.currentPlayer;
+  firstTurn = snap.firstTurn;
+  gameRecord = snap.gameRecord;
+  pendingNeutronNote = snap.pendingNeutronNote;
+  winner = null;
+  winReason = '';
+  selectedSoldier = null;
+  validDests = [];
+  neutronSelected = false;
+  drag = null;
+  anim = null;
+
+  // restart the human turn
+  if (firstTurn && currentPlayer === humanPlayer) {
+    beginHumanSoldierPhase();
+  } else {
+    beginHumanNeutronPhase();
+  }
+}
+
 function startGame(goFirst) {
   if (goFirst) {
     humanPlayer = 1;
@@ -1163,6 +1512,9 @@ function startGame(goFirst) {
   selectedSoldier = null;
   validDests = [];
   aiInstance = null;
+  gameRecord = [];
+  pendingNeutronNote = '';
+  undoStack = [];
 
   if (currentPlayer === humanPlayer) {
     beginHumanSoldierPhase();  // first turn: soldier only
@@ -1176,6 +1528,7 @@ function beginHumanNeutronPhase() {
     endGame(aiPlayer, 'Neutron is blocked');
     return;
   }
+  saveUndoSnapshot();
   phase = PHASE_HUMAN_NEUTRON;
   validDests = [];  // shown on hover over the neutron
   neutronSelected = false;
@@ -1186,6 +1539,10 @@ function beginHumanSoldierPhase() {
   if (!board.hasSoldierMove(humanPlayer)) {
     endGame(aiPlayer, 'No soldier moves available');
     return;
+  }
+  // save snapshot only at start of full human turn (not mid-turn after neutron)
+  if (firstTurn && currentPlayer === humanPlayer) {
+    saveUndoSnapshot();
   }
   phase = PHASE_HUMAN_SOLDIER_SELECT;
   validDests = [];
@@ -1243,6 +1600,7 @@ function beginAITurn() {
       const piece = board.grid[chosen[0].row][chosen[0].col];
       phase = PHASE_AI_ANIMATING;
       statusText = `Computer moves ${notation(chosen[0])} to ${notation(chosen[1])}`;
+      recordMove(aiPlayer, formatTurn('', chosen[0], chosen[1]));
       board.move(chosen[0], chosen[1]);
       animateSlide(chosen[0], chosen[1], piece, () => {
         currentPlayer = humanPlayer;
@@ -1270,16 +1628,19 @@ function beginAITurn() {
       // check winner after neutron
       const w = board.checkWinner();
       if (w !== null) {
+        recordMove(aiPlayer, 'N-' + notation(nDest));
         endGame(w);
         return;
       }
 
       if (!board.hasSoldierMove(aiPlayer)) {
+        recordMove(aiPlayer, 'N-' + notation(nDest));
         endGame(humanPlayer, 'Computer has no soldier moves');
         return;
       }
 
       const [sFrom, sTo] = ai.chooseSoldierMove(board);
+      recordMove(aiPlayer, formatTurn('N-' + notation(nDest), sFrom, sTo));
       const sPiece = board.grid[sFrom.row][sFrom.col];
       board.move(sFrom, sTo);
 
@@ -1303,6 +1664,12 @@ function endGame(w, reason) {
   winReason = reason || '';
   validDests = [];
   selectedSoldier = null;
+
+  if (autoRestart) {
+    setTimeout(() => {
+      startGame(lastGoFirst);
+    }, 1500);
+  }
 }
 </script>
 </body>
