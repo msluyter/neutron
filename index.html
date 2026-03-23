@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Neutron</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.3/p5.min.js"></script>
   <style>
@@ -14,8 +14,14 @@
       min-height: 100vh;
       background: #1a1a2e;
       font-family: 'Segoe UI', system-ui, sans-serif;
+      overflow: hidden;
+      touch-action: none;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
     }
     main { text-align: center; }
+    canvas { touch-action: none; }
   </style>
 </head>
 <body>
@@ -28,13 +34,20 @@
 // --- constants -----------------------------------------------------------
 
 const GRID = 5;
+
+// --- layout (logical coords, scaled to fit screen) -----------------------
 const CELL = 90;
-const PAD = 40;                       // padding around board for labels
-const PIECE_R = 32;                   // piece radius
+const PAD = 40;
+const PIECE_R = 32;
 const BOARD_W = GRID * CELL + PAD * 2;
-const RECORD_W = 210;                 // game record pane width
-const CANVAS_W = BOARD_W + RECORD_W;
-const CANVAS_H = GRID * CELL + PAD * 2 + 80; // extra for status text
+const RECORD_W = 210;
+// full logical size (desktop)
+const LOGICAL_W = BOARD_W + RECORD_W;
+const LOGICAL_H = GRID * CELL + PAD * 2 + 80;
+
+let S = 1;             // scale factor
+let showRecord = true; // false on narrow screens
+let CANVAS_W, CANVAS_H;
 
 const DIRS = [
   [0,1],[0,-1],[1,0],[-1,0],         // orthogonal
@@ -730,9 +743,30 @@ function posEq(a, b) { return a && b && a.col === b.col && a.row === b.row; }
 
 function notation(pos) { return COL_LABELS[pos.col] + (pos.row + 1); }
 
+// logical mouse coordinates (unscaled)
+function lmx() { return mouseX / S; }
+function lmy() { return mouseY / S; }
+
 // --- p5.js sketch --------------------------------------------------------
 
+function computeLayout() {
+  const maxW = windowWidth - 16;  // small margin
+  const maxH = windowHeight - 16;
+
+  // decide whether to show the record pane
+  showRecord = maxW >= 580;
+  const logicalW = showRecord ? LOGICAL_W : BOARD_W;
+  const logicalH = LOGICAL_H;
+
+  // scale to fit
+  S = Math.min(maxW / logicalW, maxH / logicalH, 1);
+
+  CANVAS_W = Math.floor(logicalW * S);
+  CANVAS_H = Math.floor(logicalH * S);
+}
+
 function setup() {
+  computeLayout();
   const canvas = createCanvas(CANVAS_W, CANVAS_H);
   canvas.parent('sketch-holder');
   textFont('Segoe UI, system-ui, sans-serif');
@@ -740,11 +774,19 @@ function setup() {
   statusText = 'Click to choose who goes first';
 }
 
+function windowResized() {
+  computeLayout();
+  resizeCanvas(CANVAS_W, CANVAS_H);
+}
+
 function draw() {
   background(C_BG);
+  push();
+  scale(S);
 
   if (phase === PHASE_MENU) {
     drawMenu();
+    pop();
     return;
   }
 
@@ -753,7 +795,7 @@ function draw() {
   drawHighlights();
   drawLabels();
   drawStatus();
-  drawRecord();
+  if (showRecord) drawRecord();
   drawResignButton();
   drawAutoRestart();
   drawUndoButton();
@@ -774,8 +816,10 @@ function draw() {
 
   // draw dragged piece at cursor
   if (drag) {
-    drawPieceAt(mouseX + drag.offsetX, mouseY + drag.offsetY, drag.piece);
+    drawPieceAt(lmx() + drag.offsetX, lmy() + drag.offsetY, drag.piece);
   }
+
+  pop();
 }
 
 // --- menu ----------------------------------------------------------------
@@ -1142,7 +1186,7 @@ function mouseMoved() {
   let showGrab = false;
 
   if (phase === PHASE_HUMAN_NEUTRON && !neutronSelected) {
-    const g = screenToGrid(mouseX, mouseY);
+    const g = screenToGrid(lmx(), lmy());
     if (g && posEq(g, board.neutron)) {
       validDests = board.getSlides(board.neutron);
       showGrab = true;
@@ -1151,7 +1195,7 @@ function mouseMoved() {
     }
   }
   if ((phase === PHASE_HUMAN_SOLDIER_SELECT || phase === PHASE_HUMAN_SOLDIER_DEST) && !selectedSoldier) {
-    const g = screenToGrid(mouseX, mouseY);
+    const g = screenToGrid(lmx(), lmy());
     const isMySoldier = g && board.soldiers[humanPlayer].some(
       s => s.col === g.col && s.row === g.row
     );
@@ -1176,7 +1220,7 @@ function mousePressed() {
   if (phase !== PHASE_MENU) {
     const arX = PAD + 2;
     const arY = PAD - 18;
-    if (mouseX >= arX && mouseX <= arX + 90 && mouseY >= arY - 10 && mouseY <= arY + 10) {
+    if (lmx() >= arX && lmx() <= arX + 90 && lmy() >= arY - 10 && lmy() <= arY + 10) {
       autoRestart = !autoRestart;
       return;
     }
@@ -1184,7 +1228,7 @@ function mousePressed() {
 
   // undo button check (above right corner of board)
   if (phase !== PHASE_MENU && !anim) {
-    if (dist(mouseX, mouseY, UNDO_X, UNDO_Y) < UNDO_R && undoStack.length > 0) {
+    if (dist(lmx(), lmy(), UNDO_X, UNDO_Y) < UNDO_R && undoStack.length > 0) {
       performUndo();
       return;
     }
@@ -1199,7 +1243,7 @@ function mousePressed() {
   if (phase !== PHASE_MENU && phase !== PHASE_GAME_OVER) {
     const bx = BOARD_W - PAD - 60;
     const by = PAD + GRID * CELL + 62;
-    if (mouseX >= bx && mouseX <= bx + 60 && mouseY >= by && mouseY <= by + 22) {
+    if (lmx() >= bx && lmx() <= bx + 60 && lmy() >= by && lmy() <= by + 22) {
       recordMove(humanPlayer, 'resigns');
       endGame(aiPlayer, 'You resigned');
       return;
@@ -1207,7 +1251,7 @@ function mousePressed() {
   }
 
   // try to start a drag on a movable piece
-  const g = screenToGrid(mouseX, mouseY);
+  const g = screenToGrid(lmx(), lmy());
   if (g) {
     let canDrag = false;
     let piece = null;
@@ -1230,8 +1274,8 @@ function mousePressed() {
       drag = {
         gridPos: g,
         piece: piece,
-        offsetX: center.x - mouseX,
-        offsetY: center.y - mouseY,
+        offsetX: center.x - lmx(),
+        offsetY: center.y - lmy(),
         moved: false  // becomes true on first mouseDragged
       };
       // show valid destinations immediately
@@ -1282,7 +1326,7 @@ function mouseReleased() {
   }
   cursor('default');
 
-  const g = screenToGrid(mouseX, mouseY);
+  const g = screenToGrid(lmx(), lmy());
   const isValidDest = g && validDests.some(d => d.col === g.col && d.row === g.row);
 
   if (isValidDest) {
@@ -1321,6 +1365,30 @@ function mouseReleased() {
   }
 }
 
+// --- touch handlers (delegate to mouse handlers, prevent default) ---------
+function touchStarted() {
+  if (touches.length > 0) {
+    mouseX = touches[0].x;
+    mouseY = touches[0].y;
+  }
+  mousePressed();
+  return false;
+}
+
+function touchMoved() {
+  if (touches.length > 0) {
+    mouseX = touches[0].x;
+    mouseY = touches[0].y;
+  }
+  mouseDragged();
+  return false;
+}
+
+function touchEnded() {
+  mouseReleased();
+  return false;
+}
+
 function handleMenuClick() {
   // difficulty radio buttons
   const diffY = 250;
@@ -1332,8 +1400,8 @@ function handleMenuClick() {
   ];
 
   for (const opt of opts) {
-    if (dist(mouseX, mouseY, opt.x, diffY) < hitR ||
-        (mouseX >= opt.x && mouseX <= opt.x + opt.labelW && Math.abs(mouseY - diffY) < hitR)) {
+    if (dist(lmx(), lmy(), opt.x, diffY) < hitR ||
+        (lmx() >= opt.x && lmx() <= opt.x + opt.labelW && Math.abs(lmy() - diffY) < hitR)) {
       difficulty = opt.key;
       return;
     }
@@ -1343,17 +1411,17 @@ function handleMenuClick() {
   const b1x = BOARD_W / 2 - btnW - 15;
   const b2x = BOARD_W / 2 + 15;
 
-  if (mouseX >= b1x && mouseX <= b1x + btnW && mouseY >= btnY && mouseY <= btnY + btnH) {
+  if (lmx() >= b1x && lmx() <= b1x + btnW && lmy() >= btnY && lmy() <= btnY + btnH) {
     lastGoFirst = true;
     startGame(true);
-  } else if (mouseX >= b2x && mouseX <= b2x + btnW && mouseY >= btnY && mouseY <= btnY + btnH) {
+  } else if (lmx() >= b2x && lmx() <= b2x + btnW && lmy() >= btnY && lmy() <= btnY + btnH) {
     lastGoFirst = false;
     startGame(false);
   }
 }
 
 function handleNeutronClick() {
-  const g = screenToGrid(mouseX, mouseY);
+  const g = screenToGrid(lmx(), lmy());
   if (!g) return;
 
   // click the neutron to lock highlights on
@@ -1384,7 +1452,7 @@ function handleNeutronClick() {
 }
 
 function handleSoldierSelectClick() {
-  const g = screenToGrid(mouseX, mouseY);
+  const g = screenToGrid(lmx(), lmy());
   if (!g) return;
 
   const isMySoldier = board.soldiers[humanPlayer].some(
@@ -1399,7 +1467,7 @@ function handleSoldierSelectClick() {
 }
 
 function handleSoldierDestClick() {
-  const g = screenToGrid(mouseX, mouseY);
+  const g = screenToGrid(lmx(), lmy());
   if (!g) return;
 
   // clicked a valid destination?
