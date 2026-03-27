@@ -96,6 +96,7 @@ let winner = null;
 let winReason = '';
 let aiInstance = null;
 let difficulty = 'easy'; // 'easy', 'intermediate', or 'advanced'
+let gameVariant = 'neutron'; // 'neutron' or 'bobail'
 let autoRestart = false;
 let lastGoFirst = true;       // remember choice for auto-restart
 let gameRecord = [];          // [{p1: '...', p2: '...'}, ...]
@@ -172,8 +173,29 @@ class Board {
     return dests;
   }
 
+  // King-style one-step moves (for Bobail neutron)
+  getSteps(pos) {
+    const dests = [];
+    for (const [dc, dr] of DIRS) {
+      const c = pos.col + dc, r = pos.row + dr;
+      if (c >= 0 && c < GRID && r >= 0 && r < GRID && this.grid[r][c] === ' ') {
+        dests.push({col: c, row: r});
+      }
+    }
+    return dests;
+  }
+
+  // Returns valid neutron moves based on current variant
+  getNeutronMoves() {
+    return gameVariant === 'bobail' ? this.getSteps(this.neutron) : this.getSlides(this.neutron);
+  }
+
   isValidSlide(frm, to) {
     return this.getSlides(frm).some(d => d.col === to.col && d.row === to.row);
+  }
+
+  isValidNeutronMove(to) {
+    return this.getNeutronMoves().some(d => d.col === to.col && d.row === to.row);
   }
 
   move(frm, to) {
@@ -196,7 +218,7 @@ class Board {
     return null;
   }
 
-  neutronCanMove() { return this.getSlides(this.neutron).length > 0; }
+  neutronCanMove() { return this.getNeutronMoves().length > 0; }
 
   hasSoldierMove(player) {
     return this.soldiers[player].some(s => this.getSlides(s).length > 0);
@@ -247,7 +269,7 @@ class SimpleAI {
 
   _enumerateTurns(board) {
     const turns = [];
-    for (const nDest of board.getSlides(board.neutron)) {
+    for (const nDest of board.getNeutronMoves()) {
       const b1 = board.copy();
       b1.move(b1.neutron, nDest);
       if (b1.checkWinner() === this.player) {
@@ -276,7 +298,7 @@ class SimpleAI {
     if (b.checkWinner() === this.opponent) return true;
     b.move(sMove[0], sMove[1]);
     if (b.checkWinner() === this.opponent) return true;
-    for (const od of b.getSlides(b.neutron)) {
+    for (const od of b.getNeutronMoves()) {
       const b2 = b.copy();
       b2.move(b2.neutron, od);
       if (b2.checkWinner() === this.opponent) return true;
@@ -300,7 +322,7 @@ class MinimaxAI {
     let bestNDest = null;
     let bestSMove = null;
 
-    for (const nDest of board.getSlides(board.neutron)) {
+    for (const nDest of board.getNeutronMoves()) {
       const b1 = board.copy();
       b1.move(b1.neutron, nDest);
       const w1 = b1.checkWinner();
@@ -365,7 +387,7 @@ class MinimaxAI {
     const mover = isMaximizing ? this.player : this.opponent;
 
     // neutron phase
-    const nSlides = board.getSlides(board.neutron);
+    const nSlides = board.getNeutronMoves();
     if (nSlides.length === 0) {
       // current mover can't move neutron — they lose
       return isMaximizing ? -1000 - depth : 1000 + depth;
@@ -449,7 +471,7 @@ class MinimaxAI {
     let score = (oppDist - myDist) * 20;
 
     // mobility: count how many directions the neutron can move
-    const nMoves = board.getSlides(board.neutron).length;
+    const nMoves = board.getNeutronMoves().length;
 
     // soldier mobility advantage
     let myMobility = 0, oppMobility = 0;
@@ -528,7 +550,7 @@ class AdvancedAI {
     let bestSMove = null;
 
     // generate and order neutron moves
-    const nSlides = board.getSlides(board.neutron);
+    const nSlides = board.getNeutronMoves();
     const nMoves = this._orderNeutronMoves(board, nSlides);
 
     for (const nDest of nMoves) {
@@ -590,7 +612,7 @@ class AdvancedAI {
 
     const mover = isMaximizing ? this.player : this.opponent;
 
-    const nSlides = board.getSlides(board.neutron);
+    const nSlides = board.getNeutronMoves();
     if (nSlides.length === 0) {
       return isMaximizing ? -1000 - depth : 1000 + depth;
     }
@@ -706,7 +728,7 @@ class AdvancedAI {
     score += (myMobility - oppMobility) * 3;
 
     // neutron mobility — fewer moves for opponent to exploit is good
-    const nMoves = board.getSlides(board.neutron).length;
+    const nMoves = board.getNeutronMoves().length;
     // if neutron is near our home with few escape routes, that's good for us
     if (myDist <= 1) score += (8 - nMoves) * 2;
 
@@ -831,29 +853,61 @@ function drawMenu() {
   fill(C_NEUTRON);
   textSize(42);
   textStyle(BOLD);
-  text('N E U T R O N', BOARD_W / 2, 80);
+  const title = gameVariant === 'bobail' ? 'B O B A I L' : 'N E U T R O N';
+  text(title, BOARD_W / 2, 60);
+
+  // variant toggle
+  const varY = 105;
+  textSize(14);
+  textStyle(NORMAL);
+  fill(C_TEXT);
+  textAlign(RIGHT, CENTER);
+  text('Variant:', BOARD_W / 2 - 75, varY);
+
+  const radioR = 8;
+  const varOpts = [
+    { key: 'neutron', label: 'Neutron', x: BOARD_W / 2 - 55 },
+    { key: 'bobail',  label: 'Bobail',  x: BOARD_W / 2 + 40 },
+  ];
+
+  for (const opt of varOpts) {
+    stroke(C_TEXT);
+    strokeWeight(2);
+    noFill();
+    ellipse(opt.x, varY, radioR * 2, radioR * 2);
+    if (gameVariant === opt.key) { fill(C_NEUTRON); noStroke(); ellipse(opt.x, varY, radioR, radioR); }
+    fill(C_TEXT); noStroke();
+    textAlign(LEFT, CENTER);
+    text(opt.label, opt.x + 14, varY);
+  }
+
+  textAlign(CENTER, CENTER);
 
   // rules
   fill(C_TEXT);
   textSize(15);
   textStyle(NORMAL);
-  const rules = [
+  const rules = gameVariant === 'bobail' ? [
+    'Each turn: move the neutron one square, then slide one soldier.',
+    'The neutron moves like a chess king (one square, any direction).',
+    'Soldiers slide until hitting the edge or another piece.',
+    'Win by getting the neutron to YOUR home row (bottom).',
+  ] : [
     'Each turn: slide the neutron, then slide one of your soldiers.',
     'Pieces slide in any direction until hitting the edge or another piece.',
     'Win by getting the neutron to YOUR home row (bottom).',
     'If you cannot move the neutron on your turn, you lose!',
   ];
-  rules.forEach((line, i) => text(line, BOARD_W / 2, 140 + i * 24));
+  rules.forEach((line, i) => text(line, BOARD_W / 2, 145 + i * 24));
 
   // difficulty toggle
-  const diffY = 250;
+  const diffY = 260;
   textSize(14);
   textStyle(NORMAL);
   fill(C_TEXT);
   textAlign(RIGHT, CENTER);
   text('Difficulty:', BOARD_W / 2 - 85, diffY);
 
-  const radioR = 8;
   const opts = [
     { key: 'easy',         label: 'Easy',         x: BOARD_W / 2 - 65 },
     { key: 'intermediate', label: 'Intermediate',  x: BOARD_W / 2 + 10 },
@@ -874,7 +928,7 @@ function drawMenu() {
   textAlign(CENTER, CENTER);
 
   // buttons
-  const btnY = 300;
+  const btnY = 310;
   const btnW = 180, btnH = 50;
 
   // "Go First" button
@@ -898,7 +952,7 @@ function drawMenu() {
   textSize(14);
   textStyle(NORMAL);
   textAlign(CENTER, CENTER);
-  text('Your soldiers are at the bottom of the board.', BOARD_W / 2, 370);
+  text('Your soldiers are at the bottom of the board.', BOARD_W / 2, 380);
 }
 
 // --- board drawing -------------------------------------------------------
@@ -1188,7 +1242,7 @@ function mouseMoved() {
   if (phase === PHASE_HUMAN_NEUTRON && !neutronSelected) {
     const g = screenToGrid(lmx(), lmy());
     if (g && posEq(g, board.neutron)) {
-      validDests = board.getSlides(board.neutron);
+      validDests = board.getNeutronMoves();
       showGrab = true;
     } else {
       validDests = [];
@@ -1280,7 +1334,7 @@ function mousePressed() {
       };
       // show valid destinations immediately
       if (piece === 'N') {
-        validDests = board.getSlides(board.neutron);
+        validDests = board.getNeutronMoves();
         neutronSelected = true;
         statusText = 'Drag to a destination, or click one';
       } else {
@@ -1390,9 +1444,25 @@ function touchEnded() {
 }
 
 function handleMenuClick() {
-  // difficulty radio buttons
-  const diffY = 250;
   const hitR = 20;
+
+  // variant radio buttons
+  const varY = 105;
+  const varOpts = [
+    { key: 'neutron', x: BOARD_W / 2 - 55, labelW: 60 },
+    { key: 'bobail',  x: BOARD_W / 2 + 40, labelW: 50 },
+  ];
+
+  for (const opt of varOpts) {
+    if (dist(lmx(), lmy(), opt.x, varY) < hitR ||
+        (lmx() >= opt.x && lmx() <= opt.x + opt.labelW && Math.abs(lmy() - varY) < hitR)) {
+      gameVariant = opt.key;
+      return;
+    }
+  }
+
+  // difficulty radio buttons
+  const diffY = 260;
   const opts = [
     { key: 'easy',         x: BOARD_W / 2 - 65,  labelW: 40 },
     { key: 'intermediate', x: BOARD_W / 2 + 10,   labelW: 90 },
@@ -1407,7 +1477,7 @@ function handleMenuClick() {
     }
   }
 
-  const btnY = 300, btnW = 180, btnH = 50;
+  const btnY = 310, btnW = 180, btnH = 50;
   const b1x = BOARD_W / 2 - btnW - 15;
   const b2x = BOARD_W / 2 + 15;
 
@@ -1427,7 +1497,7 @@ function handleNeutronClick() {
   // click the neutron to lock highlights on
   if (!neutronSelected && posEq(g, board.neutron)) {
     neutronSelected = true;
-    validDests = board.getSlides(board.neutron);
+    validDests = board.getNeutronMoves();
     statusText = 'Click a destination for the neutron';
     return;
   }
@@ -1654,7 +1724,7 @@ function beginAITurn() {
         const b = board.copy();
         b.move(f, t);
         if (b.checkWinner() === opponent) return false;
-        for (const nd of b.getSlides(b.neutron)) {
+        for (const nd of b.getNeutronMoves()) {
           const b2 = b.copy();
           b2.move(b2.neutron, nd);
           if (b2.checkWinner() === opponent) return false;
@@ -1690,7 +1760,7 @@ function beginAITurn() {
 
     // If AI returns null, all neutron moves lose — pick one at random and concede
     if (nDest === null) {
-      const slides = board.getSlides(board.neutron);
+      const slides = board.getNeutronMoves();
       nDest = slides[Math.floor(Math.random() * slides.length)];
       board.move(board.neutron, nDest);
       recordMove(aiPlayer, 'N-' + notation(nDest));
