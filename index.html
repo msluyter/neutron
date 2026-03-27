@@ -1686,7 +1686,22 @@ function beginAITurn() {
     }
 
     const nFrom = {...board.neutron};
-    const nDest = ai.chooseNeutronMove(board);
+    let nDest = ai.chooseNeutronMove(board);
+
+    // If AI returns null, all neutron moves lose — pick one at random and concede
+    if (nDest === null) {
+      const slides = board.getSlides(board.neutron);
+      nDest = slides[Math.floor(Math.random() * slides.length)];
+      board.move(board.neutron, nDest);
+      recordMove(aiPlayer, 'N-' + notation(nDest));
+      phase = PHASE_AI_ANIMATING;
+      statusText = 'All neutron moves lose! You win!';
+      animateSlide(nFrom, nDest, 'N', () => {
+        endGame(humanPlayer, 'All neutron moves lose');
+      });
+      return;
+    }
+
     board.move(board.neutron, nDest);
 
     // animate neutron slide, then check winner, then soldier
