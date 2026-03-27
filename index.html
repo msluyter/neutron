@@ -33,17 +33,17 @@
 
 // --- constants -----------------------------------------------------------
 
-const GRID = 5;
+let GRID = 5;
+let gridSize = 5; // 5 or 7 — set from menu
 
 // --- layout (logical coords, scaled to fit screen) -----------------------
 const CELL = 90;
 const PAD = 40;
 const PIECE_R = 32;
-const BOARD_W = GRID * CELL + PAD * 2;
 const RECORD_W = 210;
-// full logical size (desktop)
-const LOGICAL_W = BOARD_W + RECORD_W;
-const LOGICAL_H = GRID * CELL + PAD * 2 + 80;
+let BOARD_W = GRID * CELL + PAD * 2;
+let LOGICAL_W = BOARD_W + RECORD_W;
+let LOGICAL_H = GRID * CELL + PAD * 2 + 80;
 
 let S = 1;             // scale factor
 let showRecord = true; // false on narrow screens
@@ -54,7 +54,9 @@ const DIRS = [
   [1,1],[1,-1],[-1,1],[-1,-1]        // diagonal
 ];
 
-const COL_LABELS = 'abcde';
+const COL_LABELS_5 = 'abcde';
+const COL_LABELS_7 = 'abcdefg';
+let COL_LABELS = COL_LABELS_5;
 
 // colors
 const C_BG        = '#1a1a2e';
@@ -119,12 +121,13 @@ let anim = null;
 class Board {
   constructor(bottomPlayer) {
     this.grid = Array.from({length: GRID}, () => Array(GRID).fill(' '));
-    this.neutron = {col: 2, row: 2};
+    const mid = Math.floor(GRID / 2);
+    this.neutron = {col: mid, row: mid};
     this.soldiers = {1: [], 2: []};
     this.homeRow = {};
     const topPlayer = bottomPlayer === 1 ? 2 : 1;
     this.homeRow[bottomPlayer] = 0;
-    this.homeRow[topPlayer] = 4;
+    this.homeRow[topPlayer] = GRID - 1;
     this._setup(bottomPlayer, topPlayer);
   }
 
@@ -132,8 +135,8 @@ class Board {
     for (let c = 0; c < GRID; c++) {
       this._place(c, 0, String(bottom));
       this.soldiers[bottom].push({col: c, row: 0});
-      this._place(c, 4, String(top));
-      this.soldiers[top].push({col: c, row: 4});
+      this._place(c, GRID - 1, String(top));
+      this.soldiers[top].push({col: c, row: GRID - 1});
     }
     this._place(this.neutron.col, this.neutron.row, 'N');
   }
@@ -771,7 +774,16 @@ function lmy() { return mouseY / S; }
 
 // --- p5.js sketch --------------------------------------------------------
 
+function applyGridSize() {
+  GRID = gridSize;
+  COL_LABELS = GRID === 7 ? COL_LABELS_7 : COL_LABELS_5;
+  BOARD_W = GRID * CELL + PAD * 2;
+  LOGICAL_W = BOARD_W + RECORD_W;
+  LOGICAL_H = GRID * CELL + PAD * 2 + 80;
+}
+
 function computeLayout() {
+  applyGridSize();
   const maxW = windowWidth - 16;  // small margin
   const maxH = windowHeight - 16;
 
@@ -857,7 +869,7 @@ function drawMenu() {
   text(title, BOARD_W / 2, 60);
 
   // variant toggle
-  const varY = 105;
+  const varY = 100;
   textSize(14);
   textStyle(NORMAL);
   fill(C_TEXT);
@@ -881,6 +893,28 @@ function drawMenu() {
     text(opt.label, opt.x + 14, varY);
   }
 
+  // board size toggle
+  const sizeY = varY + 28;
+  fill(C_TEXT);
+  textAlign(RIGHT, CENTER);
+  text('Board:', BOARD_W / 2 - 75, sizeY);
+
+  const sizeOpts = [
+    { key: 5, label: '5 \u00D7 5', x: BOARD_W / 2 - 55 },
+    { key: 7, label: '7 \u00D7 7', x: BOARD_W / 2 + 40 },
+  ];
+
+  for (const opt of sizeOpts) {
+    stroke(C_TEXT);
+    strokeWeight(2);
+    noFill();
+    ellipse(opt.x, sizeY, radioR * 2, radioR * 2);
+    if (gridSize === opt.key) { fill(C_NEUTRON); noStroke(); ellipse(opt.x, sizeY, radioR, radioR); }
+    fill(C_TEXT); noStroke();
+    textAlign(LEFT, CENTER);
+    text(opt.label, opt.x + 14, sizeY);
+  }
+
   textAlign(CENTER, CENTER);
 
   // rules
@@ -898,10 +932,10 @@ function drawMenu() {
     'Win by getting the neutron to YOUR home row (bottom).',
     'If you cannot move the neutron on your turn, you lose!',
   ];
-  rules.forEach((line, i) => text(line, BOARD_W / 2, 145 + i * 24));
+  rules.forEach((line, i) => text(line, BOARD_W / 2, 170 + i * 24));
 
   // difficulty toggle
-  const diffY = 260;
+  const diffY = 285;
   textSize(14);
   textStyle(NORMAL);
   fill(C_TEXT);
@@ -928,7 +962,7 @@ function drawMenu() {
   textAlign(CENTER, CENTER);
 
   // buttons
-  const btnY = 310;
+  const btnY = 330;
   const btnW = 180, btnH = 50;
 
   // "Go First" button
@@ -952,7 +986,7 @@ function drawMenu() {
   textSize(14);
   textStyle(NORMAL);
   textAlign(CENTER, CENTER);
-  text('Your soldiers are at the bottom of the board.', BOARD_W / 2, 380);
+  text('Your soldiers are at the bottom of the board.', BOARD_W / 2, 400);
 }
 
 // --- board drawing -------------------------------------------------------
@@ -1175,7 +1209,7 @@ function drawResignButton() {
   text('Resign', bx + bw / 2, by + bh / 2);
 }
 
-const UNDO_X = BOARD_W - PAD - 14;
+function undoX() { return BOARD_W - PAD - 14; }
 const UNDO_Y = PAD - 18;
 const UNDO_R = 16; // click radius
 
@@ -1185,7 +1219,7 @@ function drawUndoButton() {
   const col = enabled ? C_TEXT : '#555';
 
   push();
-  translate(UNDO_X, UNDO_Y);
+  translate(undoX(), UNDO_Y);
 
   // background circle for click target
   fill(enabled ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0)');
@@ -1282,7 +1316,7 @@ function mousePressed() {
 
   // undo button check (above right corner of board)
   if (phase !== PHASE_MENU && !anim) {
-    if (dist(lmx(), lmy(), UNDO_X, UNDO_Y) < UNDO_R && undoStack.length > 0) {
+    if (dist(lmx(), lmy(), undoX(), UNDO_Y) < UNDO_R && undoStack.length > 0) {
       performUndo();
       return;
     }
@@ -1447,7 +1481,7 @@ function handleMenuClick() {
   const hitR = 20;
 
   // variant radio buttons
-  const varY = 105;
+  const varY = 100;
   const varOpts = [
     { key: 'neutron', x: BOARD_W / 2 - 55, labelW: 60 },
     { key: 'bobail',  x: BOARD_W / 2 + 40, labelW: 50 },
@@ -1461,8 +1495,25 @@ function handleMenuClick() {
     }
   }
 
+  // board size radio buttons
+  const sizeY = varY + 28;
+  const sizeOpts = [
+    { key: 5, x: BOARD_W / 2 - 55, labelW: 40 },
+    { key: 7, x: BOARD_W / 2 + 40, labelW: 40 },
+  ];
+
+  for (const opt of sizeOpts) {
+    if (dist(lmx(), lmy(), opt.x, sizeY) < hitR ||
+        (lmx() >= opt.x && lmx() <= opt.x + opt.labelW && Math.abs(lmy() - sizeY) < hitR)) {
+      gridSize = opt.key;
+      computeLayout();
+      resizeCanvas(CANVAS_W, CANVAS_H);
+      return;
+    }
+  }
+
   // difficulty radio buttons
-  const diffY = 260;
+  const diffY = 285;
   const opts = [
     { key: 'easy',         x: BOARD_W / 2 - 65,  labelW: 40 },
     { key: 'intermediate', x: BOARD_W / 2 + 10,   labelW: 90 },
@@ -1477,7 +1528,7 @@ function handleMenuClick() {
     }
   }
 
-  const btnY = 310, btnW = 180, btnH = 50;
+  const btnY = 330, btnW = 180, btnH = 50;
   const b1x = BOARD_W / 2 - btnW - 15;
   const b2x = BOARD_W / 2 + 15;
 
@@ -1634,6 +1685,9 @@ function performUndo() {
 }
 
 function startGame(goFirst) {
+  computeLayout();
+  resizeCanvas(CANVAS_W, CANVAS_H);
+
   if (goFirst) {
     humanPlayer = 1;
     aiPlayer = 2;
