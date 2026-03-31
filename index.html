@@ -31,19 +31,36 @@
 // Neutron — p5.js implementation
 // =========================================================================
 
+// --- variants ------------------------------------------------------------
+
+const VARIANTS = [
+  { key: '5x5',          label: '5\u00D75',            grid: 5, type: 'neutron', soldierRows: null },
+  { key: '5x5-bobail',   label: '5\u00D75 Bobail',     grid: 5, type: 'bobail',  soldierRows: null },
+  { key: '7x7',          label: '7\u00D77',            grid: 7, type: 'neutron', soldierRows: null },
+  { key: '7x7-advanced', label: '7\u00D77 Advanced',   grid: 7, type: 'neutron', soldierRows: [1, 5] },
+];
+
+let selectedVariant = '5x5';
+
+function getVariantConfig() {
+  return VARIANTS.find(v => v.key === selectedVariant);
+}
+
 // --- constants -----------------------------------------------------------
 
 let GRID = 5;
-let gridSize = 5; // 5 or 7 — set from menu
 
 // --- layout (logical coords, scaled to fit screen) -----------------------
 const CELL = 90;
 const PAD = 40;
 const PIECE_R = 32;
 const RECORD_W = 210;
+const CTRL_H = 90;           // control bar height above board
+
+let BOARD_Y = CTRL_H + 15;   // y offset where board grid starts (padding between panels)
 let BOARD_W = GRID * CELL + PAD * 2;
 let LOGICAL_W = BOARD_W + RECORD_W;
-let LOGICAL_H = GRID * CELL + PAD * 2 + 80;
+let LOGICAL_H = BOARD_Y + GRID * CELL + 100;
 
 let S = 1;             // scale factor
 let showRecord = true; // false on narrow screens
@@ -70,11 +87,11 @@ const C_HIGHLIGHT = 'rgba(255,255,255,0.25)';
 const C_VALID     = 'rgba(124,252,0,0.22)';
 const C_SELECTED  = 'rgba(255,255,255,0.5)';
 const C_TEXT      = '#e0e0e0';
+const C_CTRL_BG   = '#15152a';
 
 // --- game state ----------------------------------------------------------
 
 // phases
-const PHASE_MENU           = 'menu';
 const PHASE_HUMAN_NEUTRON  = 'human_neutron';
 const PHASE_HUMAN_SOLDIER_SELECT = 'human_soldier_select';
 const PHASE_HUMAN_SOLDIER_DEST   = 'human_soldier_dest';
@@ -98,11 +115,12 @@ let winner = null;
 let winReason = '';
 let aiInstance = null;
 let difficulty = 'easy'; // 'easy', 'intermediate', or 'advanced'
-let gameVariant = 'neutron'; // 'neutron' or 'bobail'
 let autoRestart = false;
 let lastGoFirst = true;       // remember choice for auto-restart
 let gameRecord = [];          // [{p1: '...', p2: '...'}, ...]
 let pendingNeutronNote = '';  // neutron notation waiting for soldier move
+let showInstructions = false; // instructions popover visible
+let gameGeneration = 0;       // incremented on each startGame; AI callbacks check this to avoid acting on stale games
 
 // drag state: { gridPos, piece, offsetX, offsetY } or null
 let drag = null;
@@ -132,11 +150,14 @@ class Board {
   }
 
   _setup(bottom, top) {
+    const v = getVariantConfig();
+    const bottomRow = v.soldierRows ? v.soldierRows[0] : 0;
+    const topRow = v.soldierRows ? v.soldierRows[1] : GRID - 1;
     for (let c = 0; c < GRID; c++) {
-      this._place(c, 0, String(bottom));
-      this.soldiers[bottom].push({col: c, row: 0});
-      this._place(c, GRID - 1, String(top));
-      this.soldiers[top].push({col: c, row: GRID - 1});
+      this._place(c, bottomRow, String(bottom));
+      this.soldiers[bottom].push({col: c, row: bottomRow});
+      this._place(c, topRow, String(top));
+      this.soldiers[top].push({col: c, row: topRow});
     }
     this._place(this.neutron.col, this.neutron.row, 'N');
   }
@@ -190,7 +211,7 @@ class Board {
 
   // Returns valid neutron moves based on current variant
   getNeutronMoves() {
-    return gameVariant === 'bobail' ? this.getSteps(this.neutron) : this.getSlides(this.neutron);
+    return getVariantConfig().type === 'bobail' ? this.getSteps(this.neutron) : this.getSlides(this.neutron);
   }
 
   isValidSlide(frm, to) {
@@ -753,13 +774,13 @@ class AdvancedAI {
 function cellCenter(col, row) {
   // row 0 = bottom of display. Screen y increases downward, so flip.
   const x = PAD + col * CELL + CELL / 2;
-  const y = PAD + (GRID - 1 - row) * CELL + CELL / 2;
+  const y = BOARD_Y + (GRID - 1 - row) * CELL + CELL / 2;
   return {x, y};
 }
 
 function screenToGrid(mx, my) {
   const col = Math.floor((mx - PAD) / CELL);
-  const row = GRID - 1 - Math.floor((my - PAD) / CELL);
+  const row = GRID - 1 - Math.floor((my - BOARD_Y) / CELL);
   if (col < 0 || col >= GRID || row < 0 || row >= GRID) return null;
   return {col, row};
 }
@@ -774,16 +795,18 @@ function lmy() { return mouseY / S; }
 
 // --- p5.js sketch --------------------------------------------------------
 
-function applyGridSize() {
-  GRID = gridSize;
+function applyVariant() {
+  const v = getVariantConfig();
+  GRID = v.grid;
   COL_LABELS = GRID === 7 ? COL_LABELS_7 : COL_LABELS_5;
   BOARD_W = GRID * CELL + PAD * 2;
+  BOARD_Y = CTRL_H + 15;
   LOGICAL_W = BOARD_W + RECORD_W;
-  LOGICAL_H = GRID * CELL + PAD * 2 + 80;
+  LOGICAL_H = BOARD_Y + GRID * CELL + 100;
 }
 
 function computeLayout() {
-  applyGridSize();
+  applyVariant();
   const maxW = windowWidth - 16;  // small margin
   const maxH = windowHeight - 16;
 
@@ -804,8 +827,7 @@ function setup() {
   const canvas = createCanvas(CANVAS_W, CANVAS_H);
   canvas.parent('sketch-holder');
   textFont('Segoe UI, system-ui, sans-serif');
-  phase = PHASE_MENU;
-  statusText = 'Click to choose who goes first';
+  startGame(true);
 }
 
 function windowResized() {
@@ -818,12 +840,7 @@ function draw() {
   push();
   scale(S);
 
-  if (phase === PHASE_MENU) {
-    drawMenu();
-    pop();
-    return;
-  }
-
+  drawControls();
   drawBoard();
   drawPieces();
   drawHighlights();
@@ -831,7 +848,6 @@ function draw() {
   drawStatus();
   if (showRecord) drawRecord();
   drawResignButton();
-  drawAutoRestart();
   drawUndoButton();
 
   // animate sliding piece
@@ -843,8 +859,9 @@ function draw() {
     drawPieceAt(cx, cy, anim.piece);
     if (t >= 1) {
       const cb = anim.onComplete;
+      const gen = anim.generation;
       anim = null;
-      if (cb) cb();
+      if (cb && gen === gameGeneration) cb();
     }
   }
 
@@ -853,140 +870,205 @@ function draw() {
     drawPieceAt(lmx() + drag.offsetX, lmy() + drag.offsetY, drag.piece);
   }
 
+  // instructions overlay (drawn last, on top of everything)
+  if (showInstructions) drawInstructionsPopover();
+
   pop();
 }
 
-// --- menu ----------------------------------------------------------------
+// --- controls bar --------------------------------------------------------
 
-function drawMenu() {
-  textAlign(CENTER, CENTER);
+function drawControls() {
+  // background bar
+  fill(C_CTRL_BG);
+  noStroke();
+  rect(0, 0, BOARD_W + (showRecord ? RECORD_W : 0), CTRL_H);
 
-  // title
-  fill(C_NEUTRON);
-  textSize(42);
+  // divider line below controls / above board
+  stroke('#666');
+  strokeWeight(1);
+  line(0, CTRL_H, BOARD_W + (showRecord ? RECORD_W : 0), CTRL_H);
+
+  const radioR = 7;
+
+  // --- Row 1: Variant radio buttons ---
+  const row1Y = 14;
+  fill('#888');
+  noStroke();
+  textSize(12);
+  textStyle(NORMAL);
+  textAlign(LEFT, CENTER);
+  text('Variant:', 8, row1Y);
+
+  let vx = 68;
+  for (const v of VARIANTS) {
+    // radio circle
+    stroke(C_TEXT);
+    strokeWeight(1.5);
+    noFill();
+    ellipse(vx, row1Y, radioR * 2, radioR * 2);
+    if (selectedVariant === v.key) { fill(C_NEUTRON); noStroke(); ellipse(vx, row1Y, radioR, radioR); }
+    // label
+    fill(C_TEXT); noStroke();
+    textAlign(LEFT, CENTER);
+    textSize(12);
+    text(v.label, vx + 12, row1Y);
+    vx += textWidth(v.label) + 30;
+  }
+
+  // Instructions link (upper-right of controls panel)
+  textAlign(RIGHT, CENTER);
+  textSize(11);
+  textStyle(NORMAL);
+  fill('#6ec6ff');
+  const instrLabel = 'Click for instructions';
+  const instrX = BOARD_W - 10;
+  text(instrLabel, instrX, row1Y);
+  // underline
+  push();
+  textSize(11);
+  const instrW = textWidth(instrLabel);
+  stroke('#6ec6ff');
+  strokeWeight(1);
+  line(instrX - instrW, row1Y + 7, instrX, row1Y + 7);
+  pop();
+
+  // --- Row 2: Difficulty radio buttons ---
+  const row2Y = 36;
+  fill('#888');
+  noStroke();
+  textSize(12);
+  textAlign(LEFT, CENTER);
+  text('Difficulty:', 8, row2Y);
+
+  const diffOpts = [
+    { key: 'easy',         label: 'Easy' },
+    { key: 'intermediate', label: 'Intermediate' },
+    { key: 'advanced',     label: 'Advanced' },
+  ];
+
+  let dx = 68;
+  for (const opt of diffOpts) {
+    stroke(C_TEXT);
+    strokeWeight(1.5);
+    noFill();
+    ellipse(dx, row2Y, radioR * 2, radioR * 2);
+    if (difficulty === opt.key) { fill(C_NEUTRON); noStroke(); ellipse(dx, row2Y, radioR, radioR); }
+    fill(C_TEXT); noStroke();
+    textAlign(LEFT, CENTER);
+    textSize(12);
+    text(opt.label, dx + 12, row2Y);
+    dx += textWidth(opt.label) + 30;
+  }
+
+  // --- Row 3: Action buttons + auto-restart + instructions + undo ---
+  const row3Y = 64;
+  const btnH = 20;
+  const btnW1 = 65, btnW2 = 75;
+
+  // Go First button
+  const b1x = 8;
+  fill(C_HUMAN);
+  noStroke();
+  rect(b1x, row3Y - btnH / 2, btnW1, btnH, 4);
+  fill('#000');
+  textSize(11);
   textStyle(BOLD);
-  const title = gameVariant === 'bobail' ? 'B O B A I L' : 'N E U T R O N';
-  text(title, BOARD_W / 2, 60);
-
-  // variant toggle
-  const varY = 100;
-  textSize(14);
-  textStyle(NORMAL);
-  fill(C_TEXT);
-  textAlign(RIGHT, CENTER);
-  text('Variant:', BOARD_W / 2 - 75, varY);
-
-  const radioR = 8;
-  const varOpts = [
-    { key: 'neutron', label: 'Neutron', x: BOARD_W / 2 - 55 },
-    { key: 'bobail',  label: 'Bobail',  x: BOARD_W / 2 + 40 },
-  ];
-
-  for (const opt of varOpts) {
-    stroke(C_TEXT);
-    strokeWeight(2);
-    noFill();
-    ellipse(opt.x, varY, radioR * 2, radioR * 2);
-    if (gameVariant === opt.key) { fill(C_NEUTRON); noStroke(); ellipse(opt.x, varY, radioR, radioR); }
-    fill(C_TEXT); noStroke();
-    textAlign(LEFT, CENTER);
-    text(opt.label, opt.x + 14, varY);
-  }
-
-  // board size toggle
-  const sizeY = varY + 28;
-  fill(C_TEXT);
-  textAlign(RIGHT, CENTER);
-  text('Board:', BOARD_W / 2 - 75, sizeY);
-
-  const sizeOpts = [
-    { key: 5, label: '5 \u00D7 5', x: BOARD_W / 2 - 55 },
-    { key: 7, label: '7 \u00D7 7', x: BOARD_W / 2 + 40 },
-  ];
-
-  for (const opt of sizeOpts) {
-    stroke(C_TEXT);
-    strokeWeight(2);
-    noFill();
-    ellipse(opt.x, sizeY, radioR * 2, radioR * 2);
-    if (gridSize === opt.key) { fill(C_NEUTRON); noStroke(); ellipse(opt.x, sizeY, radioR, radioR); }
-    fill(C_TEXT); noStroke();
-    textAlign(LEFT, CENTER);
-    text(opt.label, opt.x + 14, sizeY);
-  }
-
   textAlign(CENTER, CENTER);
+  text('Go First', b1x + btnW1 / 2, row3Y);
 
-  // rules
-  fill(C_TEXT);
-  textSize(15);
+  // Go Second button
+  const b2x = b1x + btnW1 + 8;
+  fill(C_AI);
+  rect(b2x, row3Y - btnH / 2, btnW2, btnH, 4);
+  fill('#fff');
+  textSize(11);
+  textStyle(BOLD);
+  textAlign(CENTER, CENTER);
+  text('Go Second', b2x + btnW2 / 2, row3Y);
+
+  // Auto-restart checkbox
   textStyle(NORMAL);
-  const rules = gameVariant === 'bobail' ? [
-    'Each turn: move the neutron one square, then slide one soldier.',
-    'The neutron moves like a chess king (one square, any direction).',
-    'Soldiers slide until hitting the edge or another piece.',
-    'Win by getting the neutron to YOUR home row (bottom).',
-  ] : [
+  const arX = b2x + btnW2 + 20;
+  stroke(C_TEXT);
+  strokeWeight(1.5);
+  noFill();
+  rect(arX, row3Y - 6, 12, 12, 2);
+  if (autoRestart) {
+    stroke(C_NEUTRON);
+    strokeWeight(2);
+    line(arX + 2, row3Y + 1, arX + 5, row3Y + 4);
+    line(arX + 5, row3Y + 4, arX + 10, row3Y - 3);
+  }
+  fill('#888'); noStroke();
+  textAlign(LEFT, CENTER);
+  textSize(11);
+  text('Auto', arX + 16, row3Y);
+}
+
+// --- instructions popover ------------------------------------------------
+
+function getVariantRules() {
+  const v = getVariantConfig();
+  if (v.type === 'bobail') {
+    return [
+      'Each turn: move the neutron one square, then slide one soldier.',
+      'The neutron moves like a chess king (one square, any direction).',
+      'Soldiers slide until hitting the edge or another piece.',
+      'Win by getting the neutron to YOUR home row (bottom).',
+    ];
+  }
+  const rules = [
     'Each turn: slide the neutron, then slide one of your soldiers.',
     'Pieces slide in any direction until hitting the edge or another piece.',
     'Win by getting the neutron to YOUR home row (bottom).',
     'If you cannot move the neutron on your turn, you lose!',
   ];
-  rules.forEach((line, i) => text(line, BOARD_W / 2, 170 + i * 24));
-
-  // difficulty toggle
-  const diffY = 285;
-  textSize(14);
-  textStyle(NORMAL);
-  fill(C_TEXT);
-  textAlign(RIGHT, CENTER);
-  text('Difficulty:', BOARD_W / 2 - 85, diffY);
-
-  const opts = [
-    { key: 'easy',         label: 'Easy',         x: BOARD_W / 2 - 65 },
-    { key: 'intermediate', label: 'Intermediate',  x: BOARD_W / 2 + 10 },
-    { key: 'advanced',     label: 'Advanced',      x: BOARD_W / 2 + 130 },
-  ];
-
-  for (const opt of opts) {
-    stroke(C_TEXT);
-    strokeWeight(2);
-    noFill();
-    ellipse(opt.x, diffY, radioR * 2, radioR * 2);
-    if (difficulty === opt.key) { fill(C_NEUTRON); noStroke(); ellipse(opt.x, diffY, radioR, radioR); }
-    fill(C_TEXT); noStroke();
-    textAlign(LEFT, CENTER);
-    text(opt.label, opt.x + 14, diffY);
+  if (v.soldierRows) {
+    rules.push('Soldiers start one row in from the edge, leaving a gap behind.');
   }
+  return rules;
+}
 
-  textAlign(CENTER, CENTER);
+function drawInstructionsPopover() {
+  // dim overlay
+  fill(0, 0, 0, 180);
+  noStroke();
+  rect(0, 0, BOARD_W + (showRecord ? RECORD_W : 0), LOGICAL_H);
 
-  // buttons
-  const btnY = 330;
-  const btnW = 180, btnH = 50;
+  // popover box
+  const pw = Math.min(400, BOARD_W - 40);
+  const rules = getVariantRules();
+  const ph = 80 + rules.length * 26;
+  const px = (BOARD_W - pw) / 2;
+  const py = BOARD_Y + (GRID * CELL - ph) / 2;
 
-  // "Go First" button
-  const b1x = BOARD_W / 2 - btnW - 15;
-  fill(C_HUMAN);
-  rect(b1x, btnY, btnW, btnH, 10);
-  fill('#000');
-  textSize(18);
+  fill('#2a2a4e');
+  stroke('#555');
+  strokeWeight(2);
+  rect(px, py, pw, ph, 12);
+
+  // title
+  noStroke();
+  fill(C_NEUTRON);
+  textSize(20);
   textStyle(BOLD);
-  text('Go First', b1x + btnW / 2, btnY + btnH / 2);
+  textAlign(CENTER, CENTER);
+  const v = getVariantConfig();
+  const title = v.type === 'bobail' ? 'Bobail Rules' : 'Neutron Rules';
+  text(title, px + pw / 2, py + 28);
 
-  // "Go Second" button
-  const b2x = BOARD_W / 2 + 15;
-  fill(C_AI);
-  rect(b2x, btnY, btnW, btnH, 10);
-  fill('#fff');
-  text('Go Second', b2x + btnW / 2, btnY + btnH / 2);
-
-  // piece legend
+  // rules
   fill(C_TEXT);
-  textSize(14);
+  textSize(13);
   textStyle(NORMAL);
   textAlign(CENTER, CENTER);
-  text('Your soldiers are at the bottom of the board.', BOARD_W / 2, 400);
+  rules.forEach((line, i) => text(line, px + pw / 2, py + 60 + i * 26));
+
+  // dismiss hint
+  fill('#888');
+  textSize(11);
+  text('Click anywhere to close', px + pw / 2, py + ph - 16);
 }
 
 // --- board drawing -------------------------------------------------------
@@ -1007,9 +1089,9 @@ function drawBoard() {
   strokeWeight(2);
   for (let i = 0; i <= GRID; i++) {
     const px = PAD + i * CELL;
-    const py = PAD + i * CELL;
+    const py = BOARD_Y + i * CELL;
     line(PAD, py, PAD + GRID * CELL, py);
-    line(px, PAD, px, PAD + GRID * CELL);
+    line(px, BOARD_Y, px, BOARD_Y + GRID * CELL);
   }
 }
 
@@ -1103,13 +1185,13 @@ function drawLabels() {
   textStyle(NORMAL);
   textAlign(CENTER, CENTER);
 
-  // column labels (a-e)
+  // column labels
   for (let c = 0; c < GRID; c++) {
     const {x} = cellCenter(c, 0);
-    text(COL_LABELS[c], x, PAD + GRID * CELL + 16);
+    text(COL_LABELS[c], x, BOARD_Y + GRID * CELL + 16);
   }
 
-  // row labels (1-5, bottom to top)
+  // row labels (1-N, bottom to top)
   textAlign(RIGHT, CENTER);
   for (let r = 0; r < GRID; r++) {
     const {y} = cellCenter(0, r);
@@ -1124,28 +1206,33 @@ function drawStatus() {
   if (phase === PHASE_GAME_OVER) {
     const isWin = winner === humanPlayer;
     fill(isWin ? '#4caf50' : C_AI);
-    textSize(24);
+    textSize(22);
     textStyle(BOLD);
     const msg = isWin ? 'You win!' : 'Computer wins!';
-    text(msg, BOARD_W / 2, PAD + GRID * CELL + 48);
+    text(msg, BOARD_W / 2, BOARD_Y + GRID * CELL + 42);
     fill(C_TEXT);
-    textSize(14);
+    textSize(13);
     textStyle(NORMAL);
-    if (winReason) text(winReason, BOARD_W / 2, PAD + GRID * CELL + 72);
-    text(autoRestart ? 'Restarting...' : 'Click anywhere to play again',
-         BOARD_W / 2, PAD + GRID * CELL + 92);
+    if (winReason) text(winReason, BOARD_W / 2, BOARD_Y + GRID * CELL + 64);
+    text(autoRestart ? 'Restarting...' : 'Click board to play again',
+         BOARD_W / 2, BOARD_Y + GRID * CELL + 82);
     return;
   }
 
   fill(C_TEXT);
-  textSize(16);
-  text(statusText, BOARD_W / 2, PAD + GRID * CELL + 48);
+  textSize(15);
+  text(statusText, BOARD_W / 2, BOARD_Y + GRID * CELL + 42);
 }
 
 function drawRecord() {
+  // vertical separator line
+  stroke('#666');
+  strokeWeight(1);
+  line(BOARD_W, CTRL_H, BOARD_W, LOGICAL_H);
+
   const rx = BOARD_W + 10;
   const rw = RECORD_W - 20;
-  const ry = PAD;
+  const ry = BOARD_Y;
 
   // header
   fill(C_TEXT);
@@ -1178,7 +1265,7 @@ function drawRecord() {
   textSize(12);
   textStyle(NORMAL);
   const lineH = 18;
-  const maxRows = Math.floor((CANVAS_H - ry - 60) / lineH);
+  const maxRows = Math.floor((CANVAS_H / S - ry - 60) / lineH);
   const startIdx = Math.max(0, gameRecord.length - maxRows);
 
   for (let i = startIdx; i < gameRecord.length; i++) {
@@ -1194,9 +1281,9 @@ function drawRecord() {
 }
 
 function drawResignButton() {
-  if (phase === PHASE_MENU || phase === PHASE_GAME_OVER) return;
+  if (phase === PHASE_GAME_OVER) return;
   const bx = BOARD_W - PAD - 60;
-  const by = PAD + GRID * CELL + 62;
+  const by = BOARD_Y + GRID * CELL + 62;
   const bw = 60, bh = 22;
 
   fill('#555');
@@ -1209,68 +1296,51 @@ function drawResignButton() {
   text('Resign', bx + bw / 2, by + bh / 2);
 }
 
-function undoX() { return BOARD_W - PAD - 14; }
-const UNDO_Y = PAD - 18;
-const UNDO_R = 16; // click radius
-
 function drawUndoButton() {
-  if (phase === PHASE_MENU) return;
-  const enabled = undoStack.length > 0 && !anim;
-  const col = enabled ? C_TEXT : '#555';
+  const ux = PAD + 16;
+  const uy = BOARD_Y + GRID * CELL + 73;
+  const undoEnabled = undoStack.length > 0 && !anim && phase !== PHASE_GAME_OVER;
+  const undoCol = undoEnabled ? C_TEXT : '#555';
 
   push();
-  translate(undoX(), UNDO_Y);
+  translate(ux, uy);
 
-  // background circle for click target
-  fill(enabled ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0)');
+  fill(undoEnabled ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0)');
   noStroke();
-  ellipse(0, 0, UNDO_R * 2, UNDO_R * 2);
+  ellipse(0, 0, 28, 28);
 
-  // circular arrow
-  stroke(col);
-  strokeWeight(2.5);
+  stroke(undoCol);
+  strokeWeight(2);
   noFill();
-  arc(0, 0, 18, 18, -PI * 0.75, PI * 0.55);
+  arc(0, 0, 16, 16, -PI * 0.75, PI * 0.55);
 
-  // arrowhead
   const tip = PI * 0.55;
-  const tx = 9 * cos(tip);
-  const ty = 9 * sin(tip);
-  fill(col);
+  const tx = 8 * cos(tip);
+  const ty = 8 * sin(tip);
+  fill(undoCol);
   noStroke();
   push();
   translate(tx, ty);
   rotate(tip + PI * 0.3);
-  triangle(-4, -2, 4, -2, 0, 5);
+  triangle(-3.5, -1.5, 3.5, -1.5, 0, 4);
   pop();
 
   pop();
-}
 
-function drawAutoRestart() {
-  const arX = PAD + 2;
-  const arY = PAD - 18;
-
-  stroke(C_TEXT);
-  strokeWeight(1.5);
-  noFill();
-  rect(arX, arY - 6, 12, 12, 2);
-  if (autoRestart) {
-    stroke(C_NEUTRON);
-    strokeWeight(2.5);
-    line(arX + 2, arY + 1, arX + 5, arY + 4);
-    line(arX + 5, arY + 4, arX + 10, arY - 3);
-  }
-  fill('#888'); noStroke();
+  // label
+  fill(undoCol);
+  noStroke();
+  textSize(10);
   textAlign(LEFT, CENTER);
-  textSize(11);
   textStyle(NORMAL);
-  text('Auto-restart', arX + 17, arY);
+  text('Undo', ux + 16, uy);
 }
 
 // --- input ---------------------------------------------------------------
 
 function mouseMoved() {
+  if (showInstructions) return;
+
   let showGrab = false;
 
   if (phase === PHASE_HUMAN_NEUTRON && !neutronSelected) {
@@ -1299,38 +1369,36 @@ function mouseMoved() {
 }
 
 function mousePressed() {
-  if (phase === PHASE_MENU) {
-    handleMenuClick();
+  // dismiss instructions popover
+  if (showInstructions) {
+    showInstructions = false;
     return;
   }
 
-  // auto-restart checkbox (above board, visible during gameplay and game over)
-  if (phase !== PHASE_MENU) {
-    const arX = PAD + 2;
-    const arY = PAD - 18;
-    if (lmx() >= arX && lmx() <= arX + 90 && lmy() >= arY - 10 && lmy() <= arY + 10) {
-      autoRestart = !autoRestart;
-      return;
-    }
+  // check control bar clicks
+  if (lmy() < CTRL_H) {
+    handleControlClick();
+    return;
   }
 
-  // undo button check (above right corner of board)
-  if (phase !== PHASE_MENU && !anim) {
-    if (dist(lmx(), lmy(), undoX(), UNDO_Y) < UNDO_R && undoStack.length > 0) {
-      performUndo();
-      return;
-    }
+  // undo button (lower-left of game panel)
+  const ux = PAD + 16;
+  const uy = BOARD_Y + GRID * CELL + 73;
+  if (dist(lmx(), lmy(), ux, uy) < 16 && undoStack.length > 0 && !anim && phase !== PHASE_GAME_OVER) {
+    performUndo();
+    return;
   }
 
+  // game over — click board area to restart
   if (phase === PHASE_GAME_OVER) {
-    if (!autoRestart) phase = PHASE_MENU;
+    if (!autoRestart) startGame(lastGoFirst);
     return;
   }
 
   // resign button check (during gameplay)
-  if (phase !== PHASE_MENU && phase !== PHASE_GAME_OVER) {
+  if (phase !== PHASE_GAME_OVER) {
     const bx = BOARD_W - PAD - 60;
-    const by = PAD + GRID * CELL + 62;
+    const by = BOARD_Y + GRID * CELL + 62;
     if (lmx() >= bx && lmx() <= bx + 60 && lmy() >= by && lmy() <= by + 22) {
       recordMove(humanPlayer, 'resigns');
       endGame(aiPlayer, 'You resigned');
@@ -1477,67 +1545,92 @@ function touchEnded() {
   return false;
 }
 
-function handleMenuClick() {
-  const hitR = 20;
+// --- control bar click handling ------------------------------------------
 
-  // variant radio buttons
-  const varY = 100;
-  const varOpts = [
-    { key: 'neutron', x: BOARD_W / 2 - 55, labelW: 60 },
-    { key: 'bobail',  x: BOARD_W / 2 + 40, labelW: 50 },
-  ];
+function handleControlClick() {
+  const hitR = 18;
 
-  for (const opt of varOpts) {
-    if (dist(lmx(), lmy(), opt.x, varY) < hitR ||
-        (lmx() >= opt.x && lmx() <= opt.x + opt.labelW && Math.abs(lmy() - varY) < hitR)) {
-      gameVariant = opt.key;
+  // --- Row 1: Variant radio buttons ---
+  const row1Y = 14;
+
+  // compute variant button positions (must match drawControls)
+  let vx = 68;
+  push();
+  textSize(12);
+  for (const v of VARIANTS) {
+    if (dist(lmx(), lmy(), vx, row1Y) < hitR ||
+        (lmx() >= vx && lmx() <= vx + textWidth(v.label) + 12 && Math.abs(lmy() - row1Y) < hitR)) {
+      pop();
+      if (selectedVariant !== v.key) {
+        selectedVariant = v.key;
+        startGame(lastGoFirst);
+      }
       return;
     }
+    vx += textWidth(v.label) + 30;
   }
+  pop();
 
-  // board size radio buttons
-  const sizeY = varY + 28;
-  const sizeOpts = [
-    { key: 5, x: BOARD_W / 2 - 55, labelW: 40 },
-    { key: 7, x: BOARD_W / 2 + 40, labelW: 40 },
+  // --- Row 2: Difficulty radio buttons ---
+  const row2Y = 36;
+  const diffOpts = [
+    { key: 'easy',         label: 'Easy' },
+    { key: 'intermediate', label: 'Intermediate' },
+    { key: 'advanced',     label: 'Advanced' },
   ];
 
-  for (const opt of sizeOpts) {
-    if (dist(lmx(), lmy(), opt.x, sizeY) < hitR ||
-        (lmx() >= opt.x && lmx() <= opt.x + opt.labelW && Math.abs(lmy() - sizeY) < hitR)) {
-      gridSize = opt.key;
-      computeLayout();
-      resizeCanvas(CANVAS_W, CANVAS_H);
-      return;
-    }
-  }
-
-  // difficulty radio buttons
-  const diffY = 285;
-  const opts = [
-    { key: 'easy',         x: BOARD_W / 2 - 65,  labelW: 40 },
-    { key: 'intermediate', x: BOARD_W / 2 + 10,   labelW: 90 },
-    { key: 'advanced',     x: BOARD_W / 2 + 130,  labelW: 70 },
-  ];
-
-  for (const opt of opts) {
-    if (dist(lmx(), lmy(), opt.x, diffY) < hitR ||
-        (lmx() >= opt.x && lmx() <= opt.x + opt.labelW && Math.abs(lmy() - diffY) < hitR)) {
+  let dx = 68;
+  push();
+  textSize(12);
+  for (const opt of diffOpts) {
+    if (dist(lmx(), lmy(), dx, row2Y) < hitR ||
+        (lmx() >= dx && lmx() <= dx + textWidth(opt.label) + 12 && Math.abs(lmy() - row2Y) < hitR)) {
+      pop();
       difficulty = opt.key;
       return;
     }
+    dx += textWidth(opt.label) + 30;
+  }
+  pop();
+
+  // Instructions link (upper-right, row 1)
+  push();
+  textSize(11);
+  const instrLabel = 'Click for instructions';
+  const instrW2 = textWidth(instrLabel);
+  const instrX = BOARD_W - 10;
+  pop();
+  if (lmx() >= instrX - instrW2 && lmx() <= instrX && Math.abs(lmy() - row1Y) < hitR) {
+    showInstructions = true;
+    return;
   }
 
-  const btnY = 330, btnW = 180, btnH = 50;
-  const b1x = BOARD_W / 2 - btnW - 15;
-  const b2x = BOARD_W / 2 + 15;
+  // --- Row 3: Go First, Go Second, Auto-restart ---
+  const row3Y = 64;
+  const btnH = 20;
+  const btnW1 = 65, btnW2 = 75;
+  const b1x = 8;
+  const b2x = b1x + btnW1 + 8;
 
-  if (lmx() >= b1x && lmx() <= b1x + btnW && lmy() >= btnY && lmy() <= btnY + btnH) {
+  // Go First
+  if (lmx() >= b1x && lmx() <= b1x + btnW1 && lmy() >= row3Y - btnH / 2 && lmy() <= row3Y + btnH / 2) {
     lastGoFirst = true;
     startGame(true);
-  } else if (lmx() >= b2x && lmx() <= b2x + btnW && lmy() >= btnY && lmy() <= btnY + btnH) {
+    return;
+  }
+
+  // Go Second
+  if (lmx() >= b2x && lmx() <= b2x + btnW2 && lmy() >= row3Y - btnH / 2 && lmy() <= row3Y + btnH / 2) {
     lastGoFirst = false;
     startGame(false);
+    return;
+  }
+
+  // Auto-restart checkbox
+  const arX = b2x + btnW2 + 20;
+  if (lmx() >= arX && lmx() <= arX + 50 && Math.abs(lmy() - row3Y) < 12) {
+    autoRestart = !autoRestart;
+    return;
   }
 }
 
@@ -1583,7 +1676,7 @@ function handleSoldierSelectClick() {
     selectedSoldier = g;
     validDests = board.getSlides(g);
     phase = PHASE_HUMAN_SOLDIER_DEST;
-    statusText = `Soldier ${notation(g)} selected — click a destination`;
+    statusText = `Soldier ${notation(g)} selected \u2014 click a destination`;
   }
 }
 
@@ -1612,7 +1705,7 @@ function handleSoldierDestClick() {
   if (isMySoldier && !posEq(g, selectedSoldier) && board.getSlides(g).length > 0) {
     selectedSoldier = g;
     validDests = board.getSlides(g);
-    statusText = `Soldier ${notation(g)} selected — click a destination`;
+    statusText = `Soldier ${notation(g)} selected \u2014 click a destination`;
     return;
   }
 
@@ -1685,8 +1778,8 @@ function performUndo() {
 }
 
 function startGame(goFirst) {
+  gameGeneration++;
   computeLayout();
-  resizeCanvas(CANVAS_W, CANVAS_H);
 
   if (goFirst) {
     humanPlayer = 1;
@@ -1707,6 +1800,12 @@ function startGame(goFirst) {
   gameRecord = [];
   pendingNeutronNote = '';
   undoStack = [];
+  showInstructions = false;
+  anim = null;
+  drag = null;
+
+  // resize AFTER board is created — resizeCanvas triggers an immediate redraw
+  resizeCanvas(CANVAS_W, CANVAS_H);
 
   if (currentPlayer === humanPlayer) {
     beginHumanSoldierPhase();  // first turn: soldier only
@@ -1751,7 +1850,8 @@ function animateSlide(from, to, piece, onComplete) {
     startTime: millis(),
     piece: piece,
     gridTo: to,
-    onComplete: onComplete
+    onComplete: onComplete,
+    generation: gameGeneration
   };
 }
 
@@ -1762,7 +1862,9 @@ function beginAITurn() {
   statusText = 'Computer is thinking...';
 
   // use setTimeout so the UI updates before AI blocks
+  const gen = gameGeneration;
   setTimeout(() => {
+    if (gen !== gameGeneration) return; // game was restarted; discard
     const ai = difficulty === 'advanced' ? new AdvancedAI(aiPlayer)
              : difficulty === 'intermediate' ? new MinimaxAI(aiPlayer, 3)
              : new SimpleAI(aiPlayer);
@@ -1854,6 +1956,7 @@ function beginAITurn() {
       // brief pause then animate soldier slide
       statusText = `Computer moves ${notation(sFrom)} to ${notation(sTo)}`;
       setTimeout(() => {
+        if (gen !== gameGeneration) return;
         animateSlide(sFrom, sTo, sPiece, () => {
           statusText = `Computer: N to ${notation(nDest)}, ${notation(sFrom)} to ${notation(sTo)}`;
           currentPlayer = humanPlayer;
@@ -1873,7 +1976,9 @@ function endGame(w, reason) {
   selectedSoldier = null;
 
   if (autoRestart) {
+    const gen = gameGeneration;
     setTimeout(() => {
+      if (gen !== gameGeneration) return;
       startGame(lastGoFirst);
     }, 1500);
   }
